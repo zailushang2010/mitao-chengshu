@@ -6,10 +6,10 @@ description = "蜜桃成熟 — 随机从本地片库开启多部电影到 PotPl
 authors = ["蜜桃成熟 contributors"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/OWNER/mitao-chengshu"
+repository = "https://github.com/zailushang2010/mitao-chengshu"
+homepage = "https://github.com/zailushang2010/mitao-chengshu"
 keywords = ["potplayer", "media", "random", "windows", "egui"]
 categories = ["multimedia", "gui"]
-# 发布前请将 repository 改为你的 GitHub 地址
 
 [[bin]]
 name = "蜜桃成熟"
