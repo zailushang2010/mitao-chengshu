@@ -1,43 +1,131 @@
 mod theme;
 
-use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Vec2};
-use std::path::Path;
+use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, TextureHandle, Vec2};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::session::{SessionHandle, SessionPhase};
+use crate::thumb::ThumbCache;
+use crate::tray::{TrayCommand, TrayService};
 use theme::{BG, BG_SOFT, FAINT, INK, LINE, LINE_STRONG, MUTED, ON_INK};
 
 pub struct SuijiApp {
     session: SessionHandle,
     show_settings: bool,
     pot_path_edit: String,
-    status_tick: f32,
+    thumbs: ThumbCache,
+    textures: HashMap<String, TextureHandle>,
+    tray: Option<TrayService>,
+    /// When true, next close request quits instead of tray-hide
+    force_quit: bool,
 }
 
 impl SuijiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, session: SessionHandle) -> Self {
         theme::apply_magazine_style(&cc.egui_ctx);
         let pot_path_edit = session.config_clone().potplayer_path;
+        let tray = match TrayService::try_new() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("tray unavailable: {e}");
+                None
+            }
+        };
         Self {
             session,
             show_settings: false,
             pot_path_edit,
-            status_tick: 0.0,
+            thumbs: ThumbCache::new(),
+            textures: HashMap::new(),
+            tray,
+            force_quit: false,
         }
+    }
+
+    fn show_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    }
+
+    fn hide_to_tray(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        while let Ok(cmd) = tray.rx.try_recv() {
+            match cmd {
+                TrayCommand::Show => self.show_window(ctx),
+                TrayCommand::StartOrStop => {
+                    let phase = self.session.snapshot().phase;
+                    if phase == SessionPhase::Playing {
+                        self.session.stop();
+                    } else if phase == SessionPhase::Idle {
+                        self.session.start();
+                    }
+                }
+                TrayCommand::Reroll => self.session.reroll(),
+                TrayCommand::StopSession => self.session.stop(),
+                TrayCommand::Exit => {
+                    self.force_quit = true;
+                    self.session.shutdown_if_needed();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn ensure_thumbs(&mut self, files: &[PathBuf], ctx: &egui::Context) {
+        for f in files {
+            self.thumbs.request(f);
+            let key = f.to_string_lossy().to_string();
+            if self.textures.contains_key(&key) {
+                continue;
+            }
+            if let Some(path) = self.thumbs.path_if_ready(f) {
+                if let Some(tex) = load_texture(ctx, &key, &path) {
+                    self.textures.insert(key, tex);
+                }
+            }
+        }
+        // Drop textures for files no longer in session
+        let live: std::collections::HashSet<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        self.textures.retain(|k, _| live.contains(k));
     }
 }
 
 impl eframe::App for SuijiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.status_tick += ctx.input(|i| i.unstable_dt);
-        // Poll session while busy
+        self.poll_tray(ctx);
+
+        // Close → tray (unless force quit or setting off)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let to_tray = self.session.config_clone().minimize_to_tray
+                && self.tray.is_some()
+                && !self.force_quit;
+            if to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.hide_to_tray(ctx);
+            }
+        }
+
         let snap = self.session.snapshot();
         if matches!(
             snap.phase,
             SessionPhase::Starting | SessionPhase::Stopping
-        ) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        ) || !snap.current_files.is_empty()
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
+        self.ensure_thumbs(&snap.current_files, ctx);
         let cfg = self.session.config_clone();
 
         egui::CentralPanel::default()
@@ -96,7 +184,6 @@ impl eframe::App for SuijiApp {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(22, 10))
                     .show(ui, |ui| {
-                        // count
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("本轮数量").size(13.0).color(MUTED));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -119,7 +206,6 @@ impl eframe::App for SuijiApp {
 
                         ui.add_space(8.0);
 
-                        // volume
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("统一音量").size(13.0).color(MUTED));
                             let mut vol = cfg.volume_percent as f32;
@@ -190,21 +276,23 @@ impl eframe::App for SuijiApp {
                                                 );
                                                 continue;
                                             }
-                                            let label = files
-                                                .get(idx)
+                                            let path_opt = files.get(idx);
+                                            let label = path_opt
                                                 .and_then(|p| {
                                                     p.file_name()
                                                         .map(|n| n.to_string_lossy().to_string())
                                                 })
                                                 .unwrap_or_default();
-                                            preview_cell(ui, cell_w, cell_h, &label);
+                                            let tex = path_opt.and_then(|p| {
+                                                self.textures.get(&p.to_string_lossy().to_string())
+                                            });
+                                            preview_cell(ui, cell_w, cell_h, &label, tex);
                                         }
                                     });
                                     ui.add_space(gap);
                                 }
                             });
 
-                        // fake taskbar hint
                         ui.add_space(2.0);
                         let (rect, _) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), 8.0),
@@ -292,12 +380,14 @@ impl eframe::App for SuijiApp {
                                 if link_btn(ui, "重新扫描").clicked() {
                                     self.session.rescan();
                                 }
+                                if self.tray.is_some() {
+                                    ui.label(RichText::new("·").color(FAINT));
+                                    if link_btn(ui, "最小化到托盘").clicked() {
+                                        self.hide_to_tray(ctx);
+                                    }
+                                }
                                 ui.label(RichText::new("·").color(FAINT));
-                                ui.label(
-                                    RichText::new("v0.1")
-                                        .size(11.0)
-                                        .color(FAINT),
-                                );
+                                ui.label(RichText::new("v0.2").size(11.0).color(FAINT));
                             });
                         });
                     });
@@ -320,7 +410,7 @@ impl SuijiApp {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .fixed_size([340.0, 280.0])
+            .fixed_size([340.0, 320.0])
             .open(&mut open)
             .frame(
                 egui::Frame::window(&ctx.style())
@@ -353,8 +443,12 @@ impl SuijiApp {
                     }
                 }
 
-                ui.add_space(16.0);
-                ui.label(RichText::new("PotPlayer 路径（可留空自动探测）").size(13.0).color(MUTED));
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new("PotPlayer 路径（可留空自动探测）")
+                        .size(13.0)
+                        .color(MUTED),
+                );
                 ui.add_space(4.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.pot_path_edit)
@@ -363,10 +457,7 @@ impl SuijiApp {
                 );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(sized_outline_button("浏览…", 90.0))
-                        .clicked()
-                    {
+                    if ui.add(sized_outline_button("浏览…", 90.0)).clicked() {
                         if let Some(f) = rfd::FileDialog::new()
                             .add_filter("Executable", &["exe"])
                             .pick_file()
@@ -374,16 +465,13 @@ impl SuijiApp {
                             self.pot_path_edit = f.to_string_lossy().to_string();
                         }
                     }
-                    if ui
-                        .add(sized_outline_button("保存路径", 90.0))
-                        .clicked()
-                    {
+                    if ui.add(sized_outline_button("保存路径", 90.0)).clicked() {
                         self.session
                             .set_potplayer_path(self.pot_path_edit.clone());
                     }
                 });
 
-                ui.add_space(16.0);
+                ui.add_space(14.0);
                 let mut close_on_exit = self.session.config_clone().close_session_on_exit;
                 ui.horizontal(|ui| {
                     ui.label(
@@ -396,13 +484,41 @@ impl SuijiApp {
                     }
                 });
 
-                ui.add_space(18.0);
+                ui.add_space(8.0);
+                let mut to_tray = self.session.config_clone().minimize_to_tray;
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("关闭窗口到托盘")
+                            .size(13.0)
+                            .color(MUTED),
+                    );
+                    if toggle(ui, &mut to_tray) {
+                        self.session.set_minimize_to_tray(to_tray);
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("缩略图：同目录海报图，或系统 PATH 中的 ffmpeg")
+                        .size(11.0)
+                        .color(FAINT),
+                );
+
+                ui.add_space(16.0);
                 if primary_btn(ui, "完成", true).clicked() {
                     self.show_settings = false;
                 }
             });
         self.show_settings = open;
     }
+}
+
+fn load_texture(ctx: &egui::Context, id: &str, path: &Path) -> Option<TextureHandle> {
+    let img = image::open(path).ok()?.into_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let pixels = img.into_raw();
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    Some(ctx.load_texture(id, color, egui::TextureOptions::LINEAR))
 }
 
 fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {
@@ -425,8 +541,12 @@ fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {
     let pad = Vec2::new(10.0, 4.0);
     let size = galley.size() + pad * 2.0;
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter()
-        .rect_stroke(rect, 20.0, Stroke::new(1.0, LINE_STRONG), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(
+        rect,
+        20.0,
+        Stroke::new(1.0, LINE_STRONG),
+        egui::StrokeKind::Inside,
+    );
     ui.painter().rect_filled(rect, 20.0, bg);
     ui.painter().galley(
         egui::pos2(rect.left() + pad.x, rect.top() + pad.y),
@@ -476,8 +596,7 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
 fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     let width = ui.available_width();
     let height = 42.0;
-    let (rect, mut resp) =
-        ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     if !enabled {
         resp = resp.on_disabled_hover_text("请先完成片库设置并确保有视频");
     }
@@ -499,8 +618,6 @@ fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     if enabled {
         resp
     } else {
-        resp.surrender_focus();
-        // swallow clicks
         ui.interact(rect, ui.id().with("disabled_primary"), Sense::hover())
     }
 }
@@ -533,8 +650,7 @@ fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> eg
 
 fn link_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
-        egui::Label::new(RichText::new(text).size(11.5).color(MUTED))
-            .sense(Sense::click()),
+        egui::Label::new(RichText::new(text).size(11.5).color(MUTED)).sense(Sense::click()),
     )
 }
 
@@ -545,20 +661,51 @@ fn sized_outline_button(text: &str, width: f32) -> egui::Button<'static> {
         .min_size(Vec2::new(width, 32.0))
 }
 
-fn preview_cell(ui: &mut egui::Ui, w: f32, h: f32, label: &str) {
+fn preview_cell(
+    ui: &mut egui::Ui,
+    w: f32,
+    h: f32,
+    label: &str,
+    texture: Option<&TextureHandle>,
+) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 0.0, Color32::from_rgb(0xE7, 0xE5, 0xE4));
-    ui.painter()
-        .rect_stroke(rect, 0.0, Stroke::new(1.0, LINE_STRONG), egui::StrokeKind::Inside);
+    if let Some(tex) = texture {
+        let size = tex.size_vec2();
+        let fit = (rect.width() / size.x).min(rect.height() / size.y);
+        let draw = size * fit;
+        let img_rect = egui::Rect::from_center_size(rect.center(), draw);
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_rgb(0x1C, 0x19, 0x17));
+        ui.painter().image(
+            tex.id(),
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_rgb(0xE7, 0xE5, 0xE4));
+    }
+    ui.painter().rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, LINE_STRONG),
+        egui::StrokeKind::Inside,
+    );
     if !label.is_empty() {
         let short = truncate_path(label, 14);
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 16.0),
+            rect.max,
+        );
+        ui.painter()
+            .rect_filled(bar, 0.0, Color32::from_rgba_unmultiplied(28, 25, 23, 160));
         ui.painter().text(
             egui::pos2(rect.left() + 4.0, rect.bottom() - 14.0),
             egui::Align2::LEFT_TOP,
             short,
             egui::FontId::proportional(9.0),
-            MUTED,
+            ON_INK,
         );
     }
 }

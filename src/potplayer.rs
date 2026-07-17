@@ -1,16 +1,20 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Threading::{
-    OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-};
+use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
 const CANDIDATES: &[&str] = &[
     r"C:\Program Files\DAUM\PotPlayer\PotPlayerMini64.exe",
     r"C:\Program Files\DAUM\PotPlayer\PotPlayerMini.exe",
     r"C:\Program Files (x86)\DAUM\PotPlayer\PotPlayerMini.exe",
 ];
+
+/// Stagger between multi-instance launches so each window can register.
+const LAUNCH_STAGGER_MS: u64 = 180;
 
 pub fn resolve_potplayer_path(configured: &str) -> Option<PathBuf> {
     if !configured.trim().is_empty() {
@@ -34,14 +38,14 @@ pub struct LaunchedItem {
     pub pid: u32,
 }
 
-pub fn launch_many(
-    potplayer: &Path,
-    files: &[PathBuf],
-) -> (Vec<LaunchedItem>, Vec<String>) {
+pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, Vec<String>) {
     let mut ok = Vec::new();
     let mut errors = Vec::new();
 
-    for file in files {
+    for (i, file) in files.iter().enumerate() {
+        if i > 0 {
+            thread::sleep(Duration::from_millis(LAUNCH_STAGGER_MS));
+        }
         match launch_one(potplayer, file) {
             Ok(pid) => ok.push(LaunchedItem {
                 path: file.clone(),
@@ -71,8 +75,8 @@ pub fn kill_pids(pids: &[u32]) {
 
 fn kill_pid(pid: u32) -> Result<(), String> {
     unsafe {
-        let handle: HANDLE = OpenProcess(PROCESS_TERMINATE, false, pid)
-            .map_err(|e| e.to_string())?;
+        let handle: HANDLE =
+            OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|e| e.to_string())?;
         let result = TerminateProcess(handle, 1);
         let _ = CloseHandle(handle);
         result.map_err(|e| e.to_string())?;
@@ -80,46 +84,45 @@ fn kill_pid(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Best-effort: find top-level windows belonging to the given PIDs.
+/// Find primary (largest visible top-level) window for each PID, with retries.
 pub fn find_hwnds_for_pids(pids: &[u32], attempts: u32, delay_ms: u64) -> Vec<(u32, isize)> {
-    use std::thread;
-    use std::time::Duration;
+    let want: HashSet<u32> = pids.iter().copied().collect();
+    let mut best: HashMap<u32, (isize, i64)> = HashMap::new();
 
-    let mut found: Vec<(u32, isize)> = Vec::new();
-    let want: std::collections::HashSet<u32> = pids.iter().copied().collect();
-
-    for _ in 0..attempts {
-        let mut batch = Vec::new();
-        enum_top_level_windows(|hwnd, pid| {
-            if want.contains(&pid) && !found.iter().any(|(p, h)| *p == pid && *h == hwnd) {
-                // Prefer first window per pid; keep one primary per pid
-                if !batch.iter().any(|(p, _): &(u32, isize)| *p == pid)
-                    && !found.iter().any(|(p, _)| *p == pid)
-                {
-                    batch.push((pid, hwnd));
-                }
+    for attempt in 0..attempts {
+        enum_top_level_windows(|hwnd, pid, area| {
+            if !want.contains(&pid) || area < 20_000 {
+                return;
+            }
+            let entry = best.entry(pid).or_insert((hwnd, 0));
+            if area > entry.1 {
+                *entry = (hwnd, area);
             }
         });
-        found.extend(batch);
 
-        if found.len() >= want.len() {
+        if best.len() >= want.len() && attempt >= 2 {
+            // Found all; still give one more short settle after attempt 2
             break;
         }
         thread::sleep(Duration::from_millis(delay_ms));
     }
 
-    found
+    // Preserve input PID order
+    pids.iter()
+        .filter_map(|pid| best.get(pid).map(|(h, _)| (*pid, *h)))
+        .collect()
 }
 
-fn enum_top_level_windows(mut f: impl FnMut(isize, u32)) {
+fn enum_top_level_windows(mut f: impl FnMut(isize, u32, i64)) {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
+        EnumWindows, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        GW_OWNER,
     };
 
     struct Ctx<'a> {
-        f: &'a mut dyn FnMut(isize, u32),
+        f: &'a mut dyn FnMut(isize, u32, i64),
     }
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -129,21 +132,32 @@ fn enum_top_level_windows(mut f: impl FnMut(isize, u32)) {
         if pid == 0 {
             return BOOL(1);
         }
-        // Visible, top-level (no owner)
-        if IsWindowVisible(hwnd).as_bool() {
-            let owner = GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default());
-            if owner.0.is_null() {
-                (ctx.f)(hwnd.0 as isize, pid);
-            }
+        if !IsWindowVisible(hwnd).as_bool() {
+            return BOOL(1);
         }
+        // Skip minimized-only enumeration for size; still include for restore later
+        let owner = GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default());
+        if !owner.0.is_null() {
+            return BOOL(1);
+        }
+
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return BOOL(1);
+        }
+        let w = (rect.right - rect.left).max(0) as i64;
+        let h = (rect.bottom - rect.top).max(0) as i64;
+        let mut area = w * h;
+        // Minimized windows often report small shell rects — still accept with floor
+        if IsIconic(hwnd).as_bool() {
+            area = area.max(100_000);
+        }
+        (ctx.f)(hwnd.0 as isize, pid, area);
         BOOL(1)
     }
 
     let mut ctx = Ctx { f: &mut f };
     unsafe {
-        let _ = EnumWindows(
-            Some(callback),
-            LPARAM(&mut ctx as *mut Ctx<'_> as isize),
-        );
+        let _ = EnumWindows(Some(callback), LPARAM(&mut ctx as *mut Ctx<'_> as isize));
     }
 }

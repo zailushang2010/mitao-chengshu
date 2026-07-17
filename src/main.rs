@@ -7,7 +7,9 @@ mod library;
 mod picker;
 mod potplayer;
 mod session;
+mod thumb;
 mod tiler;
+mod tray;
 
 use eframe::egui;
 use session::SessionHandle;

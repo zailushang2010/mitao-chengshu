@@ -1,7 +1,8 @@
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowPos, SystemParametersInfoW, HWND_TOP, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER,
-    SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    IsIconic, IsZoomed, SetWindowPos, ShowWindow, SystemParametersInfoW, HWND_TOP, SPI_GETWORKAREA,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_RESTORE, SYSTEM_PARAMETERS_INFO_ACTION,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +75,6 @@ pub fn grid_layout(n: usize, area: Rect) -> Vec<Rect> {
         let c = i % cols;
         let left = area.left + c as i32 * cell_w;
         let top = area.top + r as i32 * cell_h;
-        // Last column/row absorbs remainder pixels
         let right = if c + 1 == cols {
             area.right
         } else {
@@ -104,17 +104,28 @@ pub fn tile_hwnds(hwnds: &[isize], rects: &[Rect]) {
     }
 }
 
+/// Place windows; run twice with a short gap for stubborn players.
+pub fn tile_hwnds_stable(hwnds: &[isize], rects: &[Rect]) {
+    tile_hwnds(hwnds, rects);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    tile_hwnds(hwnds, rects);
+}
+
 fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
     unsafe {
-        // Clear maximized if needed by positioning with frame
+        let h = HWND(hwnd as *mut _);
+        // Restore from maximized / minimized so SetWindowPos applies reliably
+        if IsZoomed(h).as_bool() || IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
         SetWindowPos(
-            HWND(hwnd as *mut _),
+            h,
             Some(HWND_TOP),
             rect.left,
             rect.top,
             rect.width(),
             rect.height(),
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE,
         )
         .map_err(|e| e.to_string())?;
     }
@@ -144,7 +155,6 @@ mod tests {
             assert!(c.width() > 0);
             assert!(c.height() > 0);
         }
-        // No horizontal overlap in first row
         assert_eq!(cells[0].right, cells[1].left);
         assert_eq!(cells[1].right, cells[2].left);
     }

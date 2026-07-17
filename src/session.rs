@@ -124,6 +124,12 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
+    pub fn set_minimize_to_tray(&self, v: bool) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.minimize_to_tray = v;
+        let _ = crate::config::save(&g.config);
+    }
+
     pub fn update_library_path(&self, path: String) {
         let mut g = self.inner.lock().unwrap();
         g.config.library_path = path.clone();
@@ -287,26 +293,17 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         return;
     }
 
-    // Tile windows
     let pids: Vec<u32> = launched.iter().map(|i| i.pid).collect();
-    let hwnd_pairs = potplayer::find_hwnds_for_pids(&pids, 12, 200);
-    if let Ok(area) = tiler::work_area() {
-        let rects = tiler::grid_layout(hwnd_pairs.len().max(1), area);
-        // Map hwnd order to rects by launch order when possible
-        let mut hwnds_ordered = Vec::new();
-        for item in &launched {
-            if let Some((_, h)) = hwnd_pairs.iter().find(|(p, _)| *p == item.pid) {
-                hwnds_ordered.push(*h);
-            }
-        }
-        if !hwnds_ordered.is_empty() {
-            let rects = tiler::grid_layout(hwnds_ordered.len(), area);
-            tiler::tile_hwnds(&hwnds_ordered, &rects);
-        } else {
-            let hwnds: Vec<isize> = hwnd_pairs.iter().map(|(_, h)| *h).collect();
-            tiler::tile_hwnds(&hwnds, &rects);
-        }
-    }
+    tile_session(&pids);
+
+    // Late re-tile: some PotPlayer builds move themselves after first paint
+    let pids_retile = pids.clone();
+    thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(900));
+        tile_session(&pids_retile);
+        thread::sleep(std::time::Duration::from_millis(700));
+        tile_session(&pids_retile);
+    });
 
     // Update history with successfully launched
     {
@@ -327,4 +324,25 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
         g.message = msg;
     }
+}
+
+fn tile_session(pids: &[u32]) {
+    let hwnd_pairs = potplayer::find_hwnds_for_pids(pids, 15, 180);
+    if hwnd_pairs.is_empty() {
+        return;
+    }
+    let Ok(area) = tiler::work_area() else {
+        return;
+    };
+    let mut hwnds_ordered = Vec::new();
+    for pid in pids {
+        if let Some((_, h)) = hwnd_pairs.iter().find(|(p, _)| p == pid) {
+            hwnds_ordered.push(*h);
+        }
+    }
+    if hwnds_ordered.is_empty() {
+        hwnds_ordered = hwnd_pairs.iter().map(|(_, h)| *h).collect();
+    }
+    let rects = tiler::grid_layout(hwnds_ordered.len(), area);
+    tiler::tile_hwnds_stable(&hwnds_ordered, &rects);
 }

@@ -14,6 +14,13 @@ pub struct Config {
     pub potplayer_path: String,
     pub video_extensions: Vec<String>,
     pub close_session_on_exit: bool,
+    /// Close button hides to tray instead of quitting.
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -39,6 +46,7 @@ impl Default for Config {
                 ".webm".into(),
             ],
             close_session_on_exit: false,
+            minimize_to_tray: true,
         }
     }
 }
