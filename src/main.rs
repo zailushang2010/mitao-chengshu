@@ -45,27 +45,42 @@ fn main() -> eframe::Result<()> {
     let _ = std::fs::remove_file(config::app_data_dir().join("suiji_potplayer.lock"));
     let _ = std::fs::remove_file(config::app_data_dir().join("mitao_chengshu.lock"));
 
-    let mut cfg = config::load_or_default();
-    // Ensure demo / known library path if empty
-    if !cfg.has_library() {
-        let demo = r"F:\电影";
-        if std::path::Path::new(demo).is_dir() {
-            cfg.add_library_path(demo.to_string());
-            let _ = config::save(&cfg);
-            log_line("set library_paths to include F:\\电影");
+    let cfg_path = config::config_path();
+    log_line(&format!("config path: {}", cfg_path.display()));
+
+    let cfg = if cfg_path.is_file() {
+        match config::load_from(&cfg_path) {
+            Some(c) => {
+                log_line("config loaded OK");
+                c
+            }
+            None => {
+                log_line("config corrupt or unreadable — using defaults (see config.json.bak)");
+                let c = config::Config::default().normalize();
+                let _ = config::save(&c);
+                c
+            }
         }
-    }
-    if !config::config_path().exists() {
-        let _ = config::save(&cfg);
-    }
+    } else {
+        log_line("no config.json yet — creating defaults (empty library)");
+        let c = config::Config::default().normalize();
+        let _ = config::save(&c);
+        c
+    };
+
+    // Do NOT hard-code F:\电影 anymore — user sets libraries in 片库设置.
     log_line(&format!(
-        "config library_paths={:?} count={}",
+        "library_paths={:?} count={} (min={} max={})",
         cfg.library_roots(),
-        cfg.default_count
+        cfg.default_count,
+        cfg.count_min,
+        cfg.count_max
     ));
 
     let session = SessionHandle::new(cfg);
-    if !session.snapshot().library_roots.is_empty() {
+    if session.snapshot().library_roots.is_empty() {
+        log_line("no library roots configured — open 片库设置 to add folders");
+    } else {
         session.rescan();
         log_line(&format!(
             "indexed {} videos from {} roots",

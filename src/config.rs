@@ -224,7 +224,13 @@ pub fn load_or_default() -> Config {
 }
 
 pub fn load_from(path: &Path) -> Option<Config> {
-    let raw = fs::read_to_string(path).ok()?;
+    // Read as bytes then UTF-8 to tolerate BOM from some editors
+    let bytes = fs::read(path).ok()?;
+    let raw = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8_lossy(&bytes[3..]).into_owned()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
     match serde_json::from_str::<Config>(&raw) {
         Ok(c) => Some(c.normalize()),
         Err(_) => {
