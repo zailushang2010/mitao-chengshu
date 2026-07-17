@@ -687,47 +687,43 @@ impl SuijiApp {
                         .size(13.0)
                         .color(MUTED),
                 );
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 {
                     let cfg_now = self.session.config_clone();
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("下限").size(12.5).color(MUTED));
-                        if small_step_btn(ui, "−").clicked() {
-                            self.session.set_count_bounds(
-                                cfg_now.count_min.saturating_sub(1),
-                                cfg_now.count_max,
-                            );
-                        }
-                        ui.label(
-                            RichText::new(format!("{}", cfg_now.count_min))
-                                .size(15.0)
-                                .color(INK)
-                                .strong(),
+                    // Two equal columns so 下限 / 上限 stay on one level row
+                    ui.columns(2, |cols| {
+                        bound_stepper(
+                            &mut cols[0],
+                            "下限",
+                            cfg_now.count_min,
+                            || {
+                                self.session.set_count_bounds(
+                                    cfg_now.count_min.saturating_sub(1),
+                                    cfg_now.count_max,
+                                );
+                            },
+                            || {
+                                self.session
+                                    .set_count_bounds(cfg_now.count_min + 1, cfg_now.count_max);
+                            },
                         );
-                        if small_step_btn(ui, "+").clicked() {
-                            self.session
-                                .set_count_bounds(cfg_now.count_min + 1, cfg_now.count_max);
-                        }
-
-                        ui.add_space(16.0);
-                        ui.label(RichText::new("上限").size(12.5).color(MUTED));
-                        if small_step_btn(ui, "−").clicked() {
-                            self.session.set_count_bounds(
-                                cfg_now.count_min,
-                                cfg_now.count_max.saturating_sub(1),
-                            );
-                        }
-                        ui.label(
-                            RichText::new(format!("{}", cfg_now.count_max))
-                                .size(15.0)
-                                .color(INK)
-                                .strong(),
+                        bound_stepper(
+                            &mut cols[1],
+                            "上限",
+                            cfg_now.count_max,
+                            || {
+                                self.session.set_count_bounds(
+                                    cfg_now.count_min,
+                                    cfg_now.count_max.saturating_sub(1),
+                                );
+                            },
+                            || {
+                                self.session
+                                    .set_count_bounds(cfg_now.count_min, cfg_now.count_max + 1);
+                            },
                         );
-                        if small_step_btn(ui, "+").clicked() {
-                            self.session
-                                .set_count_bounds(cfg_now.count_min, cfg_now.count_max + 1);
-                        }
                     });
+                    ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!(
                             "绝对范围 {}–{}；改后主界面「本轮数量」按此限制",
@@ -853,6 +849,45 @@ fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {
         egui::pos2(rect.left() + pad.x, rect.top() + pad.y),
         galley,
         fg,
+    );
+}
+
+/// One bound row: label + − value +  (vertically centered, fixed height)
+fn bound_stepper(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: usize,
+    on_dec: impl FnOnce(),
+    on_inc: impl FnOnce(),
+) {
+    let row_h = 36.0;
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), row_h),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_height(row_h);
+            ui.label(
+                RichText::new(label)
+                    .size(13.0)
+                    .color(MUTED),
+            );
+            ui.add_space(8.0);
+            if small_step_btn(ui, "−").clicked() {
+                on_dec();
+            }
+            // Fixed-width number so 下限/上限 columns stay aligned
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(36.0, row_h), Sense::hover());
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{value}"),
+                egui::FontId::proportional(16.0),
+                INK,
+            );
+            if small_step_btn(ui, "+").clicked() {
+                on_inc();
+            }
+        },
     );
 }
 
