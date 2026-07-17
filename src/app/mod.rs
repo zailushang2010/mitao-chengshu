@@ -245,7 +245,7 @@ impl eframe::App for SuijiApp {
                                     ui.add_space(1.0);
                                     ui.label(
                                         RichText::new("今日片单")
-                                            .size(22.0)
+                                            .size(28.0)
                                             .color(INK)
                                             .strong(),
                                     );
@@ -390,7 +390,7 @@ impl eframe::App for SuijiApp {
                                     let cell_w = ((total_w - gap * (cols as f32 - 1.0))
                                         / cols as f32)
                                         .max(32.0);
-                                    let cell_h = (cell_w * 10.0 / 16.0).min(42.0);
+                                    let cell_h = (cell_w * 10.0 / 16.0).min(56.0);
 
                                     for r in 0..rows {
                                         ui.horizontal(|ui| {
@@ -579,8 +579,9 @@ impl eframe::App for SuijiApp {
                             .unwrap_or(440.0)
                     });
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                        w.clamp(400.0, 520.0),
-                        used_h.clamp(320.0, 900.0),
+                        w.clamp(480.0, 640.0),
+                        // Prefer a roomier window; only shrink if content is huge
+                        used_h.clamp(560.0, 980.0),
                     )));
                     self.fit_height_frames = self.fit_height_frames.saturating_sub(1);
                     ctx.request_repaint();
@@ -604,7 +605,8 @@ impl SuijiApp {
             .collapsible(false)
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_size([360.0, 420.0])
+            .default_size([460.0, 560.0])
+            .min_size([420.0, 480.0])
             .open(&mut open)
             .frame(
                 egui::Frame::window(&ctx.style())
@@ -850,7 +852,7 @@ fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {
 }
 
 fn small_step_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let size = Vec2::new(28.0, 28.0);
+    let size = Vec2::new(34.0, 34.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let stroke = if resp.hovered() {
         Stroke::new(1.0, MUTED)
@@ -889,7 +891,7 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
 
 fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     let width = ui.available_width();
-    let height = 42.0;
+    let height = 48.0;
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     if !enabled {
         resp = resp.on_disabled_hover_text("请先完成片库设置并确保有视频");
@@ -906,7 +908,7 @@ fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
         rect.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::proportional(14.0),
+        egui::FontId::proportional(16.0),
         ON_INK,
     );
     if enabled {
@@ -917,10 +919,10 @@ fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
 }
 
 fn mini_text_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let pad = Vec2::new(8.0, 3.0);
+    let pad = Vec2::new(10.0, 5.0);
     let galley = ui.painter().layout_no_wrap(
         text.to_string(),
-        egui::FontId::proportional(11.0),
+        egui::FontId::proportional(12.5),
         INK,
     );
     let size = galley.size() + pad * 2.0;
@@ -944,7 +946,7 @@ fn mini_text_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
     let stroke = if !enabled {
         Stroke::new(1.0, LINE)
     } else if resp.hovered() {
@@ -959,7 +961,7 @@ fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> eg
         rect.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::proportional(12.5),
+        egui::FontId::proportional(14.0),
         fg,
     );
     if enabled {
@@ -971,7 +973,7 @@ fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> eg
 
 fn link_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
-        egui::Label::new(RichText::new(text).size(11.5).color(MUTED)).sense(Sense::click()),
+        egui::Label::new(RichText::new(text).size(13.0).color(MUTED)).sense(Sense::click()),
     )
 }
 
@@ -984,7 +986,7 @@ enum IconKind {
 
 /// Magazine-style square icon button with hover + tooltip.
 fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
-    let size = Vec2::new(34.0, 34.0);
+    let size = Vec2::new(40.0, 40.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let hovered = resp.hovered();
     let stroke = if hovered {

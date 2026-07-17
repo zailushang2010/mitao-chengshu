@@ -19,19 +19,21 @@ pub fn apply_magazine_style(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(14.0, 10.0);
     style.spacing.window_margin = egui::Margin::same(0);
-    // Prefer slightly larger base for CJK readability
+    // Larger base for readability on the enlarged window
     style.text_styles.insert(
         egui::TextStyle::Body,
-        egui::FontId::new(15.0, FontFamily::Proportional),
+        egui::FontId::new(16.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Button,
-        egui::FontId::new(14.0, FontFamily::Proportional),
+        egui::FontId::new(15.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Heading,
-        egui::FontId::new(24.0, FontFamily::Proportional),
+        egui::FontId::new(28.0, FontFamily::Proportional),
     );
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(16.0, 12.0);
     style.visuals = magazine_visuals();
     ctx.set_style(style);
 }
