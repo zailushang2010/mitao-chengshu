@@ -258,6 +258,11 @@ impl Config {
             return None;
         }
         let removed = list.remove(index);
+        // Clear legacy field before normalize, or empty library_paths would
+        // re-migrate the just-removed path from library_path.
+        if matches!(mode, MediaMode::Movie) && self.library_paths.is_empty() {
+            self.library_path.clear();
+        }
         *self = self.clone().normalize();
         Some(removed)
     }

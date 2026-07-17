@@ -213,7 +213,7 @@ fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
-        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP, HWND_TOPMOST,
+        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
         SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     };
 

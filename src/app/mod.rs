@@ -1111,12 +1111,8 @@ impl eframe::App for SuijiApp {
                                         self.slide_tex = None;
                                         let style = self.session.config_clone().image_play_style;
                                         self.show_toast(match style {
-                                            ImagePlayStyle::Slideshow => {
-                                                "幻灯开始 · Esc 结束".into()
-                                            }
-                                            ImagePlayStyle::Wall => {
-                                                "平铺墙 · 点击放大 · Esc 结束".into()
-                                            }
+                                            ImagePlayStyle::Slideshow => "幻灯开始 · Esc 结束",
+                                            ImagePlayStyle::Wall => "平铺墙 · 点击放大 · Esc 结束",
                                         });
                                     } else {
                                         self.show_toast("正在按预览片单开播…");
