@@ -18,7 +18,7 @@ use std::io::Write;
 use std::sync::Mutex;
 
 /// Window title used to find / focus an existing instance.
-const WINDOW_TITLE: &str = "suijiPotPlayer · 今日片单";
+const WINDOW_TITLE: &str = crate::tray::WINDOW_TITLE;
 const MUTEX_NAME: &str = "Local\\suijiPotPlayer_SingleInstance_v1";
 
 fn main() -> eframe::Result<()> {

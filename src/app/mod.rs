@@ -32,7 +32,7 @@ impl SuijiApp {
             .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
 
         let pot_path_edit = session.config_clone().potplayer_path;
-        let tray = match TrayService::try_new() {
+        let tray = match TrayService::try_new(cc.egui_ctx.clone()) {
             Ok(t) => Some(t),
             Err(e) => {
                 eprintln!("tray unavailable: {e}");
@@ -57,19 +57,29 @@ impl SuijiApp {
     }
 
     fn show_window(&self, ctx: &egui::Context) {
+        // Win32 first (reliable when hidden), then sync eframe viewport state
+        crate::tray::force_show_main_window();
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
     }
 
     fn hide_to_tray(&self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        // Keep the event loop semi-alive so tray commands can be processed sooner
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
         let Some(tray) = self.tray.as_ref() else {
             return;
         };
+
+        if tray.show_requested.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.show_window(ctx);
+        }
+
         while let Ok(cmd) = tray.rx.try_recv() {
             match cmd {
                 TrayCommand::Show => self.show_window(ctx),
@@ -80,12 +90,21 @@ impl SuijiApp {
                     } else if phase == SessionPhase::Idle {
                         self.session.start();
                     }
+                    // Ensure window is visible when controlling session from tray
+                    self.show_window(ctx);
                 }
-                TrayCommand::Reroll => self.session.reroll(),
-                TrayCommand::StopSession => self.session.stop(),
+                TrayCommand::Reroll => {
+                    self.session.reroll();
+                    self.show_window(ctx);
+                }
+                TrayCommand::StopSession => {
+                    self.session.stop();
+                    self.show_window(ctx);
+                }
                 TrayCommand::Exit => {
                     self.force_quit = true;
                     self.session.shutdown_if_needed();
+                    crate::tray::force_show_main_window();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -124,6 +143,12 @@ impl eframe::App for SuijiApp {
         }
 
         self.poll_tray(ctx);
+
+        // While we may be hidden, keep a light repaint heartbeat so tray
+        // channel is drained even if winit is quiet.
+        if self.tray.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
 
         // Close → tray (unless force quit or setting off)
         if ctx.input(|i| i.viewport().close_requested()) {
