@@ -192,14 +192,14 @@ impl eframe::App for SuijiApp {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("SUIJI  ·  POTPLAYER")
+                                    RichText::new("随机片库 · PotPlayer")
                                         .size(10.5)
                                         .color(FAINT)
-                                        .extra_letter_spacing(2.0),
+                                        .extra_letter_spacing(1.5),
                                 );
                                 ui.add_space(2.0);
                                 ui.label(
-                                    RichText::new("今日片单")
+                                    RichText::new(crate::brand::APP_NAME)
                                         .size(24.0)
                                         .color(INK)
                                         .strong(),

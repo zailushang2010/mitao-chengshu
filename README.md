@@ -1,24 +1,18 @@
-# suijiPotPlayer · 今日片单
+# 蜜桃成熟
 
-本地电影太多、选择困难时用的小工具：从**单一片库目录**随机抽出 5–10 部，用 **PotPlayer 多实例**在屏幕**工作区网格**（避开任务栏）平铺播放。
+本地电影太多、选择困难时用的小工具：从**一个或多个片库目录**随机抽出 5–10 部，用 **PotPlayer 多实例**在屏幕**工作区网格**（避开任务栏）平铺播放。
 
-纸感杂志风界面 · Rust 单文件 · 开 / 关 / 再来一轮 · 托盘 · 缩略图预览
+纸感杂志风界面 · Rust · 开 / 关 / 再来一轮 · 托盘 · 缩略图预览
 
 ## 功能
 
-- 支持**多个片库目录**同时递归扫描，按扩展名识别视频
+- 支持**多个片库目录**同时递归扫描
 - 可调本轮数量（默认 5–10）、统一音量偏好、避开最近播放
 - **开启本轮** / **再来一轮** / **关闭本轮**（只结束本工具拉起的进程）
-- 窗口自动网格平铺，不遮挡任务栏（错峰启动 + 多次重定位）
-- **系统托盘**：关闭窗口默认进托盘；右键可显示 / 开停 / 再来一轮 / 退出
-- **本轮预览缩略图**：同目录海报图，或 PATH 中的 `ffmpeg` 抽帧缓存
+- 窗口自动网格平铺，不遮挡任务栏
+- 右上角图标：片库设置 / 重新扫描 / 最小化到托盘
+- 默认点 **关闭(X) = 退出程序**；托盘仅通过图标手动收起（设置里可改）
 - 配置与历史写在 exe 同目录：`config.json`、`history.json`
-
-## 环境
-
-- Windows 10/11
-- 已安装 [PotPlayer](https://potplayer.daum.net/)
-- 构建需要 [Rust](https://rustup.rs/)（仅开发时）
 
 ## 构建
 
@@ -26,45 +20,35 @@
 cargo build --release
 ```
 
-产物：`target/release/suiji_potplayer.exe`  
-可复制到任意目录使用（建议固定目录，便于保留配置）。
+产物：`target/release/蜜桃成熟.exe`  
+图标：`src/icon.ico`（嵌入 exe，并用于窗口 / 托盘）
 
 ## 使用
 
-1. 运行 `suiji_potplayer.exe`
-2. 打开 **片库设置** → **添加文件夹…**（可多次添加多个目录）→ 等待索引
+1. 运行 `蜜桃成熟.exe`
+2. 右上角 ⚙ → **添加文件夹…**（可多个）→ 等待索引
 3. 调整数量 / 音量 / 防重复（可选）
 4. 点击 **开启本轮**
-5. 看腻了点 **再来一轮** 或 **关闭本轮**
-
-首次若未自动找到 PotPlayer，在设置中浏览指定 `PotPlayerMini64.exe`。
 
 ## 配置说明（`config.json`）
 
 | 字段 | 含义 |
 |------|------|
-| `library_paths` | 电影目录列表（可多个，合并扫描） |
-| `library_path` | 兼容旧配置的单路径（会自动并入 `library_paths`） |
+| `library_paths` | 电影目录列表（可多个） |
+| `library_path` | 兼容旧单路径，会并入 `library_paths` |
 | `default_count` | 默认开启数量 |
 | `count_min` / `count_max` | 数量调节范围 |
-| `volume_percent` | 音量偏好（0–100；播放器侧以实际支持为准） |
+| `volume_percent` | 音量偏好（0–100） |
 | `avoid_recent` | 是否避开最近播放 |
 | `recent_history_size` | 历史条数上限 |
 | `potplayer_path` | 空则自动探测 |
 | `video_extensions` | 识别的后缀列表 |
 | `close_session_on_exit` | 退出程序时是否关掉本轮 PotPlayer |
-| `minimize_to_tray` | 点关闭(X)时是否进托盘（默认 false=退出程序；右上角图标仍可手动收起） |
+| `minimize_to_tray` | 点关闭(X)时是否进托盘（默认 false） |
 
 ## 开发
 
 ```bash
 cargo test
-cargo run
+cargo run --release
 ```
-
-设计规格：`docs/superpowers/specs/2026-07-17-suiji-potplayer-design.md`  
-实现计划：`docs/superpowers/plans/2026-07-17-suiji-potplayer.md`
-
-## 许可
-
-自用工具，按需修改。

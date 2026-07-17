@@ -39,7 +39,7 @@ pub fn apply_magazine_style(ctx: &egui::Context) {
 /// Load a system Chinese font as the primary proportional face so UI text is not tofu/mojibake.
 fn install_cjk_fonts(ctx: &egui::Context) {
     let Some((name, bytes, index)) = load_best_cjk_font() else {
-        eprintln!("suijiPotPlayer: no CJK font found under %WINDIR%\\Fonts");
+        eprintln!("蜜桃成熟: no CJK font found under %WINDIR%\\Fonts");
         return;
     };
 
@@ -82,7 +82,7 @@ fn load_best_cjk_font() -> Option<(String, Vec<u8>, u32)> {
         let path = fonts_dir.join(file);
         if let Ok(bytes) = std::fs::read(&path) {
             if bytes.len() > 1000 {
-                eprintln!("suijiPotPlayer: using CJK font {}", path.display());
+                eprintln!("蜜桃成熟: using CJK font {}", path.display());
                 return Some((name.to_string(), bytes, *index));
             }
         }

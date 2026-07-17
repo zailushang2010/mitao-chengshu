@@ -8,12 +8,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::brand::{self, APP_NAME, WINDOW_TITLE};
 use egui::Context;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-
-/// Must match the real window title set in `main.rs`.
-pub const WINDOW_TITLE: &str = "suijiPotPlayer · 今日片单";
+use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -63,10 +61,10 @@ impl TrayService {
         let exit_id = exit.id().clone();
         let menu_items = vec![show, toggle, reroll, stop, exit];
 
-        let icon = make_icon();
+        let icon = brand::tray_icon().unwrap_or_else(fallback_tray_icon);
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("suijiPotPlayer · 今日片单（点击显示窗口）")
+            .with_tooltip(&format!("{APP_NAME}（点击显示窗口）"))
             .with_icon(icon)
             .build()
             .map_err(|e| e.to_string())?;
@@ -175,13 +173,13 @@ pub fn force_show_main_window() {
     unsafe {
         let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) else {
             // Fallback: enum windows containing our brand string
-            if let Some(h) = find_window_containing("suijiPotPlayer") {
+            if let Some(h) = find_window_containing(APP_NAME) {
                 show_hwnd(h);
             }
             return;
         };
         if hwnd.0.is_null() {
-            if let Some(h) = find_window_containing("suijiPotPlayer") {
+            if let Some(h) = find_window_containing(APP_NAME) {
                 show_hwnd(h);
             }
             return;
@@ -264,27 +262,28 @@ fn find_window_containing(part: &str) -> Option<windows::Win32::Foundation::HWND
     ctx.found
 }
 
-fn make_icon() -> Icon {
+fn fallback_tray_icon() -> tray_icon::Icon {
+    // Simple peach-ish placeholder if ico decode fails
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
         for x in 0..size {
             let i = ((y * size + x) * 4) as usize;
-            rgba[i] = 0xF7;
-            rgba[i + 1] = 0xF3;
-            rgba[i + 2] = 0xEC;
-            rgba[i + 3] = 0xFF;
-            if x >= 8 && x < 24 && y >= 8 && y < 24 {
-                rgba[i] = 0x1C;
-                rgba[i + 1] = 0x19;
-                rgba[i + 2] = 0x17;
-            }
-            if x >= 10 && x < 22 && y >= 14 && y < 18 {
+            let cx = x as f32 - 15.5;
+            let cy = y as f32 - 16.5;
+            let r2 = cx * cx + cy * cy;
+            if r2 < 12.0 * 12.0 {
+                rgba[i] = 0xF4;
+                rgba[i + 1] = 0x8F;
+                rgba[i + 2] = 0xA0;
+                rgba[i + 3] = 0xFF;
+            } else {
                 rgba[i] = 0xF7;
                 rgba[i + 1] = 0xF3;
                 rgba[i + 2] = 0xEC;
+                rgba[i + 3] = 0xFF;
             }
         }
     }
-    Icon::from_rgba(rgba, size, size).expect("icon")
+    tray_icon::Icon::from_rgba(rgba, size, size).expect("fallback icon")
 }

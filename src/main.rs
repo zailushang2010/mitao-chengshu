@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod brand;
 mod config;
 mod history;
 mod library;
@@ -11,15 +12,12 @@ mod thumb;
 mod tiler;
 mod tray;
 
+use brand::{APP_NAME, MUTEX_NAME, WINDOW_TITLE};
 use eframe::egui;
 use session::SessionHandle;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
-
-/// Window title used to find / focus an existing instance.
-const WINDOW_TITLE: &str = crate::tray::WINDOW_TITLE;
-const MUTEX_NAME: &str = "Local\\suijiPotPlayer_SingleInstance_v1";
 
 fn main() -> eframe::Result<()> {
     init_log();
@@ -32,7 +30,7 @@ fn main() -> eframe::Result<()> {
             log_line("already running — focusing existing window");
             focus_existing_window();
             message_box(
-                "suijiPotPlayer",
+                APP_NAME,
                 "程序已在运行。\n\n若看不到窗口，请查看任务栏或托盘区（右下角小图标）。\n已尝试把已有窗口带到前台。",
             );
             return Ok(());
@@ -43,8 +41,9 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    // Clean stale lock file from older versions
+    // Clean stale lock files from older versions
     let _ = std::fs::remove_file(config::app_data_dir().join("suiji_potplayer.lock"));
+    let _ = std::fs::remove_file(config::app_data_dir().join("mitao_chengshu.lock"));
 
     let mut cfg = config::load_or_default();
     // Ensure demo / known library path if empty
@@ -66,7 +65,7 @@ fn main() -> eframe::Result<()> {
     ));
 
     let session = SessionHandle::new(cfg);
-    if session.snapshot().library_roots.is_empty() == false {
+    if !session.snapshot().library_roots.is_empty() {
         session.rescan();
         log_line(&format!(
             "indexed {} videos from {} roots",
@@ -75,7 +74,7 @@ fn main() -> eframe::Result<()> {
         ));
     }
 
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([440.0, 680.0])
         .with_min_inner_size([400.0, 520.0])
         .with_max_inner_size([520.0, 900.0])
@@ -84,6 +83,10 @@ fn main() -> eframe::Result<()> {
         .with_active(true)
         .with_title(WINDOW_TITLE);
 
+    if let Some(icon) = brand::egui_icon_data() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
         viewport,
         centered: true,
@@ -91,7 +94,7 @@ fn main() -> eframe::Result<()> {
     };
 
     let result = eframe::run_native(
-        "suijiPotPlayer",
+        APP_NAME,
         native_options,
         Box::new(|cc| {
             log_line("eframe created");
@@ -105,7 +108,7 @@ fn main() -> eframe::Result<()> {
     if let Err(ref e) = result {
         let msg = format!("启动失败：{e}\n\n详细日志：同目录 startup.log");
         log_line(&msg);
-        message_box("suijiPotPlayer 启动失败", &msg);
+        message_box(&format!("{APP_NAME} 启动失败"), &msg);
     }
     result
 }
@@ -137,7 +140,10 @@ fn acquire_mutex() -> MutexAcquire {
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    let wide: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = MUTEX_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         match CreateMutexW(None, true, PCWSTR(wide.as_ptr())) {
             Ok(handle) => {
