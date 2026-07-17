@@ -752,41 +752,21 @@ impl eframe::App for SuijiApp {
                             }
 
                             ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                let w = (ui.available_width() - 8.0) / 2.0;
-                                let reroll_ok = !busy
-                                    && can_lib
-                                    && (playing || snap.phase == SessionPhase::Idle);
-                                if secondary_btn(ui, w, "换一桌", reroll_ok).clicked() {
-                                    self.session.reroll();
-                                    self.fit_height_frames = 6;
-                                    self.show_toast("已换一桌预览（未自动播放）");
-                                }
-                                ui.add_space(8.0);
-                                let right_label = if playing {
-                                    "关闭本轮"
-                                } else if has_preview {
-                                    "再预览"
+                            // Single secondary: 换一桌 only (no duplicate 再预览)
+                            let reroll_ok = !busy
+                                && can_lib
+                                && (playing || snap.phase == SessionPhase::Idle);
+                            if secondary_btn(ui, ui.available_width(), "换一桌", reroll_ok)
+                                .clicked()
+                            {
+                                self.session.reroll();
+                                self.fit_height_frames = 6;
+                                if playing {
+                                    self.show_toast("已停播并换一桌预览（未自动播放）");
                                 } else {
-                                    "关闭本轮"
-                                };
-                                let right_ok = if playing {
-                                    !busy
-                                } else if has_preview {
-                                    !busy && can_lib
-                                } else {
-                                    false
-                                };
-                                if secondary_btn(ui, w, right_label, right_ok).clicked() {
-                                    if playing {
-                                        self.session.stop();
-                                    } else if has_preview {
-                                        self.session.roll_preview();
-                                        self.fit_height_frames = 6;
-                                        self.show_toast("已重新预览");
-                                    }
+                                    self.show_toast("已换一桌预览");
                                 }
-                            });
+                            }
                         });
                 });
 
