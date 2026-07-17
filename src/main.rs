@@ -48,28 +48,30 @@ fn main() -> eframe::Result<()> {
 
     let mut cfg = config::load_or_default();
     // Ensure demo / known library path if empty
-    if cfg.library_path.trim().is_empty() {
+    if !cfg.has_library() {
         let demo = r"F:\电影";
         if std::path::Path::new(demo).is_dir() {
-            cfg.library_path = demo.to_string();
+            cfg.add_library_path(demo.to_string());
             let _ = config::save(&cfg);
-            log_line("set library_path to F:\\电影");
+            log_line("set library_paths to include F:\\电影");
         }
     }
     if !config::config_path().exists() {
         let _ = config::save(&cfg);
     }
     log_line(&format!(
-        "config library={:?} count={}",
-        cfg.library_path, cfg.default_count
+        "config library_paths={:?} count={}",
+        cfg.library_roots(),
+        cfg.default_count
     ));
 
     let session = SessionHandle::new(cfg);
-    if !session.snapshot().library_root.is_empty() {
+    if session.snapshot().library_roots.is_empty() == false {
         session.rescan();
         log_line(&format!(
-            "indexed {} videos",
-            session.snapshot().library_count
+            "indexed {} videos from {} roots",
+            session.snapshot().library_count,
+            session.snapshot().library_roots.len()
         ));
     }
 

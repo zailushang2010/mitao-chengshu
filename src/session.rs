@@ -23,7 +23,11 @@ pub struct SessionSnapshot {
     pub message: String,
     pub current_files: Vec<PathBuf>,
     pub library_count: usize,
+    /// Short UI label (1 path or "A 等 N 个目录")
+    #[allow(dead_code)]
     pub library_root: String,
+    /// Full list of configured roots
+    pub library_roots: Vec<String>,
     pub last_errors: Vec<String>,
 }
 
@@ -35,6 +39,7 @@ impl Default for SessionSnapshot {
             current_files: Vec::new(),
             library_count: 0,
             library_root: String::new(),
+            library_roots: Vec::new(),
             last_errors: Vec::new(),
         }
     }
@@ -58,11 +63,8 @@ pub struct SessionHandle {
 impl SessionHandle {
     pub fn new(config: Config) -> Self {
         let history = History::load();
-        let library = if config.library_path.is_empty() {
-            Library::empty()
-        } else {
-            Library::scan(&config.library_path, &config.video_extensions)
-        };
+        let roots = config.library_roots();
+        let library = scan_config_roots(&roots, &config.video_extensions);
         let ui_count = config.default_count;
         let inner = Inner {
             config,
@@ -86,7 +88,8 @@ impl SessionHandle {
             message: g.message.clone(),
             current_files: g.items.iter().map(|i| i.path.clone()).collect(),
             library_count: g.library.len(),
-            library_root: g.config.library_path.clone(),
+            library_root: g.config.library_label(),
+            library_roots: g.config.library_roots(),
             last_errors: g.last_errors.clone(),
         }
     }
@@ -130,9 +133,34 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
+    /// Replace all roots with a single path (legacy helper).
+    #[allow(dead_code)]
     pub fn update_library_path(&self, path: String) {
         let mut g = self.inner.lock().unwrap();
-        g.config.library_path = path.clone();
+        g.config.library_paths = if path.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![path]
+        };
+        g.config = g.config.clone().normalize();
+        let _ = crate::config::save(&g.config);
+        g.message = "索引中…".into();
+        drop(g);
+        self.rescan();
+    }
+
+    pub fn add_library_path(&self, path: String) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.add_library_path(path);
+        let _ = crate::config::save(&g.config);
+        g.message = "索引中…".into();
+        drop(g);
+        self.rescan();
+    }
+
+    pub fn remove_library_path(&self, index: usize) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.remove_library_path(index);
         let _ = crate::config::save(&g.config);
         g.message = "索引中…".into();
         drop(g);
@@ -147,27 +175,32 @@ impl SessionHandle {
 
     pub fn rescan(&self) {
         let mut g = self.inner.lock().unwrap();
-        let path = g.config.library_path.clone();
+        let roots = g.config.library_roots();
         let exts = g.config.video_extensions.clone();
         g.message = "索引中…".into();
         drop(g);
 
-        let lib = if path.is_empty() {
-            Library::empty()
-        } else {
-            Library::scan(&path, &exts)
-        };
+        let lib = scan_config_roots(&roots, &exts);
 
         let mut g = self.inner.lock().unwrap();
         g.library = lib;
         g.message = if g.library.is_empty() {
-            if path.is_empty() {
+            if roots.is_empty() {
                 "请先设置片库目录".into()
             } else {
                 "片库中未找到视频".into()
             }
         } else {
-            format!("就绪 · 已索引 {} 部", g.library.len())
+            let n_dirs = roots.len();
+            if n_dirs > 1 {
+                format!(
+                    "就绪 · {} 个目录 · 已索引 {} 部",
+                    n_dirs,
+                    g.library.len()
+                )
+            } else {
+                format!("就绪 · 已索引 {} 部", g.library.len())
+            }
         };
     }
 
@@ -324,6 +357,14 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
         g.message = msg;
     }
+}
+
+fn scan_config_roots(roots: &[String], exts: &[String]) -> Library {
+    if roots.is_empty() {
+        return Library::empty();
+    }
+    let paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+    Library::scan_many(&paths, exts)
 }
 
 fn tile_session(pids: &[u32]) {

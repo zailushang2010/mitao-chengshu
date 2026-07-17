@@ -4,7 +4,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Legacy single path (kept for old configs / backward compatibility).
+    #[serde(default)]
     pub library_path: String,
+    /// One or more movie roots (recursive). Preferred field.
+    #[serde(default)]
+    pub library_paths: Vec<String>,
     pub default_count: usize,
     pub count_min: usize,
     pub count_max: usize,
@@ -27,6 +32,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             library_path: String::new(),
+            library_paths: Vec::new(),
             default_count: 6,
             count_min: 5,
             count_max: 10,
@@ -56,6 +62,29 @@ impl Config {
         n.clamp(self.count_min, self.count_max)
     }
 
+    /// All configured roots after normalize (non-empty unique paths).
+    pub fn library_roots(&self) -> Vec<String> {
+        self.library_paths
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    pub fn has_library(&self) -> bool {
+        !self.library_roots().is_empty()
+    }
+
+    /// Short label for UI header.
+    pub fn library_label(&self) -> String {
+        let roots = self.library_roots();
+        match roots.len() {
+            0 => String::new(),
+            1 => roots[0].clone(),
+            n => format!("{} 等 {} 个目录", short_name(&roots[0]), n),
+        }
+    }
+
     pub fn normalize(mut self) -> Self {
         if self.count_min == 0 {
             self.count_min = 1;
@@ -73,8 +102,78 @@ impl Config {
                 format!(".{lower}")
             };
         }
+
+        // Merge legacy library_path into library_paths
+        let mut paths: Vec<String> = self
+            .library_paths
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let legacy = self.library_path.trim().to_string();
+        if !legacy.is_empty() {
+            let exists = paths
+                .iter()
+                .any(|p| path_key(p) == path_key(&legacy));
+            if !exists {
+                paths.insert(0, legacy);
+            }
+        }
+        // Dedupe (Windows: case-insensitive)
+        let mut seen = std::collections::HashSet::new();
+        paths.retain(|p| seen.insert(path_key(p)));
+        self.library_paths = paths;
+        // Keep library_path as first root for old tools
+        self.library_path = self
+            .library_paths
+            .first()
+            .cloned()
+            .unwrap_or_default();
         self
     }
+
+    pub fn add_library_path(&mut self, path: String) {
+        let path = path.trim().to_string();
+        if path.is_empty() {
+            return;
+        }
+        if self
+            .library_paths
+            .iter()
+            .any(|p| path_key(p) == path_key(&path))
+        {
+            return;
+        }
+        self.library_paths.push(path);
+        *self = self.clone().normalize();
+    }
+
+    pub fn remove_library_path(&mut self, index: usize) {
+        if index < self.library_paths.len() {
+            self.library_paths.remove(index);
+            *self = self.clone().normalize();
+        }
+    }
+}
+
+fn path_key(p: &str) -> String {
+    let s = p.trim().trim_end_matches(['/', '\\']).to_string();
+    #[cfg(windows)]
+    {
+        s.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        s
+    }
+}
+
+fn short_name(p: &str) -> String {
+    Path::new(p)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| p.to_string())
 }
 
 pub fn app_data_dir() -> PathBuf {
@@ -141,6 +240,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_library_path_merges_into_paths() {
+        let mut c = Config::default();
+        c.library_path = r"D:\Movies".into();
+        c.library_paths = vec![r"E:\More".into()];
+        let c = c.normalize();
+        assert_eq!(c.library_roots().len(), 2);
+        assert!(c.library_roots().iter().any(|p| p.contains("Movies")));
+        assert!(c.library_roots().iter().any(|p| p.contains("More")));
+    }
+
+    #[test]
+    fn add_path_dedupes_case_insensitive() {
+        let mut c = Config::default();
+        c.add_library_path(r"D:\Movies".into());
+        c.add_library_path(r"d:\movies".into());
+        assert_eq!(c.library_roots().len(), 1);
+    }
+
+    #[test]
     fn corrupt_json_returns_none() {
         let path = tmp_file("bad.json");
         fs::write(&path, "{not json").unwrap();
@@ -150,14 +268,15 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_roundtrip() {
+    fn save_and_load_roundtrip_multi() {
         let path = tmp_file("ok.json");
         let mut c = Config::default();
-        c.library_path = r"D:\Movies".into();
+        c.library_paths = vec![r"D:\Movies".into(), r"F:\电影".into()];
         c.default_count = 8;
+        let c = c.normalize();
         save_to(&path, &c).unwrap();
         let loaded = load_from(&path).unwrap();
-        assert_eq!(loaded.library_path, r"D:\Movies");
+        assert_eq!(loaded.library_roots().len(), 2);
         assert_eq!(loaded.default_count, 8);
         let _ = fs::remove_file(&path);
     }

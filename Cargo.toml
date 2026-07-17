@@ -1,6 +1,6 @@
 [package]
 name = "suiji_potplayer"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "随机从本地片库开启多部电影到 PotPlayer 并网格平铺"
 authors = ["suijiPotPlayer"]

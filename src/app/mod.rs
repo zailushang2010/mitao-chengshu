@@ -42,7 +42,7 @@ impl SuijiApp {
         // Open settings on first run if library empty after scan
         let show_settings = {
             let s = session.snapshot();
-            s.library_root.is_empty() || s.library_count == 0
+            s.library_roots.is_empty() || s.library_count == 0
         };
         Self {
             session,
@@ -183,10 +183,16 @@ impl eframe::App for SuijiApp {
                             });
                         });
                         ui.add_space(6.0);
-                        let root_label = if snap.library_root.is_empty() {
+                        let root_label = if snap.library_roots.is_empty() {
                             "未设置片库".to_string()
+                        } else if snap.library_roots.len() == 1 {
+                            truncate_path(&snap.library_roots[0], 42)
                         } else {
-                            truncate_path(&snap.library_root, 42)
+                            format!(
+                                "{} 等 {} 个目录",
+                                truncate_path(&snap.library_roots[0], 24),
+                                snap.library_roots.len()
+                            )
                         };
                         ui.label(
                             RichText::new(format!(
@@ -362,7 +368,7 @@ impl eframe::App for SuijiApp {
                         let primary = if playing { "关闭本轮" } else { "开启本轮" };
                         let primary_enabled = !busy
                             && (playing
-                                || (!snap.library_root.is_empty() && snap.library_count > 0));
+                                || (!snap.library_roots.is_empty() && snap.library_count > 0));
 
                         if primary_btn(ui, primary, primary_enabled).clicked() {
                             if playing {
@@ -428,9 +434,9 @@ impl SuijiApp {
         let mut open = self.show_settings;
         egui::Window::new("片库设置")
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .fixed_size([340.0, 320.0])
+            .default_size([360.0, 420.0])
             .open(&mut open)
             .frame(
                 egui::Frame::window(&ctx.style())
@@ -440,28 +446,65 @@ impl SuijiApp {
                     .inner_margin(16.0),
             )
             .show(ctx, |ui| {
-                ui.label(RichText::new("电影主目录").size(13.0).color(MUTED));
-                ui.add_space(4.0);
-                let root = self.session.snapshot().library_root;
                 ui.label(
-                    RichText::new(if root.is_empty() {
-                        "（尚未选择）".into()
-                    } else {
-                        root
-                    })
-                    .size(12.5)
-                    .color(INK),
+                    RichText::new("片库目录（可添加多个，将合并扫描）")
+                        .size(13.0)
+                        .color(MUTED),
                 );
+                ui.add_space(6.0);
+
+                let roots = self.session.snapshot().library_roots;
+                if roots.is_empty() {
+                    ui.label(
+                        RichText::new("（尚未添加目录）")
+                            .size(12.5)
+                            .color(FAINT),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            let mut remove_idx: Option<usize> = None;
+                            for (i, root) in roots.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{}.  {}", i + 1, root))
+                                            .size(12.0)
+                                            .color(INK),
+                                    );
+                                    ui.with_layout(
+                                        Layout::right_to_left(Align::Center),
+                                        |ui| {
+                                            if link_btn(ui, "移除").clicked() {
+                                                remove_idx = Some(i);
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add_space(4.0);
+                            }
+                            if let Some(i) = remove_idx {
+                                self.session.remove_library_path(i);
+                            }
+                        });
+                }
+
                 ui.add_space(8.0);
                 if ui
-                    .add(sized_outline_button("选择文件夹…", ui.available_width()))
+                    .add(sized_outline_button("添加文件夹…", ui.available_width()))
                     .clicked()
                 {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                         self.session
-                            .update_library_path(folder.to_string_lossy().to_string());
+                            .add_library_path(folder.to_string_lossy().to_string());
                     }
                 }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("每个目录都会递归扫描子文件夹；重复路径会自动去重")
+                        .size(11.0)
+                        .color(FAINT),
+                );
 
                 ui.add_space(14.0);
                 ui.label(
