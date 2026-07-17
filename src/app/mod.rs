@@ -47,15 +47,23 @@ impl SuijiApp {
                 None
             }
         };
-        // Open settings on first run if library empty after scan
-        let show_settings = {
+        // Guide user to pick libraries — never invent a disk path for them
+        let need_library = {
             let s = session.snapshot();
             s.library_roots.is_empty() || s.library_count == 0
         };
         let last_fit_count = session.ui_count();
+        let toast = if need_library {
+            Some((
+                "请先添加片库目录（右上角齿轮 · 片库设置）".to_string(),
+                4.5,
+            ))
+        } else {
+            None
+        };
         Self {
             session,
-            show_settings,
+            show_settings: need_library,
             pot_path_edit,
             thumbs: ThumbCache::new(),
             textures: HashMap::new(),
@@ -66,7 +74,7 @@ impl SuijiApp {
             last_fit_count,
             last_phase: SessionPhase::Idle,
             user_hid_to_tray: false,
-            toast: None,
+            toast,
         }
     }
 

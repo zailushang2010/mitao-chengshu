@@ -45,45 +45,45 @@ fn main() -> eframe::Result<()> {
     let _ = std::fs::remove_file(config::app_data_dir().join("suiji_potplayer.lock"));
     let _ = std::fs::remove_file(config::app_data_dir().join("mitao_chengshu.lock"));
 
+    // Config is the single source of truth. Never inject hard-coded disks (e.g. F:\电影).
+    // Do not log full library paths (privacy).
     let cfg_path = config::config_path();
-    log_line(&format!("config path: {}", cfg_path.display()));
+    log_line(&format!("config: {}", cfg_path.display()));
 
     let cfg = if cfg_path.is_file() {
         match config::load_from(&cfg_path) {
             Some(c) => {
-                log_line("config loaded OK");
+                log_line("config: loaded");
                 c
             }
             None => {
-                log_line("config corrupt or unreadable — using defaults (see config.json.bak)");
+                // Keep broken file as .bak; do not silently invent a new library path
+                log_line("config: unreadable → defaults (backup: config.json.bak)");
                 let c = config::Config::default().normalize();
                 let _ = config::save(&c);
                 c
             }
         }
     } else {
-        log_line("no config.json yet — creating defaults (empty library)");
+        log_line("config: missing → create empty defaults");
         let c = config::Config::default().normalize();
         let _ = config::save(&c);
         c
     };
 
-    // Do NOT hard-code F:\电影 anymore — user sets libraries in 片库设置.
+    let n_roots = cfg.library_roots().len();
     log_line(&format!(
-        "library_paths={:?} count={} (min={} max={})",
-        cfg.library_roots(),
-        cfg.default_count,
-        cfg.count_min,
-        cfg.count_max
+        "session: roots={} count={} range={}-{}",
+        n_roots, cfg.default_count, cfg.count_min, cfg.count_max
     ));
 
     let session = SessionHandle::new(cfg);
-    if session.snapshot().library_roots.is_empty() {
-        log_line("no library roots configured — open 片库设置 to add folders");
+    if n_roots == 0 {
+        log_line("session: no library — UI will open settings");
     } else {
         session.rescan();
         log_line(&format!(
-            "indexed {} videos from {} roots",
+            "session: indexed {} files from {} roots",
             session.snapshot().library_count,
             session.snapshot().library_roots.len()
         ));
