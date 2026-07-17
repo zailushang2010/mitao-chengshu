@@ -75,8 +75,8 @@ fn main() -> eframe::Result<()> {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([440.0, 680.0])
-        .with_min_inner_size([400.0, 520.0])
+        .with_inner_size([440.0, 620.0])
+        .with_min_inner_size([400.0, 480.0])
         .with_max_inner_size([520.0, 900.0])
         .with_resizable(true)
         .with_visible(true)

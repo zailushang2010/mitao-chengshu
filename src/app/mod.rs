@@ -251,18 +251,26 @@ impl eframe::App for SuijiApp {
                         });
                     });
 
-                // ── Scrollable middle (won't push footer off-screen) ──
-                let footer_h = 118.0;
-                let mid_h = (ui.available_height() - footer_h).max(120.0);
+                // ── Middle: shrink-to-content (no empty stretch before footer) ──
+                // Reserve only enough for footer so scroll appears when needed.
+                let footer_reserve = 104.0;
+                let mid_max = (ui.available_height() - footer_reserve).max(80.0);
 
                 egui::ScrollArea::vertical()
-                    .max_height(mid_h)
-                    .auto_shrink([false, false])
+                    .max_height(mid_max)
+                    // Critical: allow vertical shrink so preview sits tight above buttons
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         // Controls
                         egui::Frame::NONE
-                            .inner_margin(egui::Margin::symmetric(20, 10))
+                            .inner_margin(egui::Margin {
+                                left: 20,
+                                right: 20,
+                                top: 8,
+                                bottom: 4,
+                            })
                             .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0;
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("本轮数量").size(13.0).color(MUTED));
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -283,8 +291,6 @@ impl eframe::App for SuijiApp {
                                     });
                                 });
 
-                                ui.add_space(8.0);
-
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("统一音量").size(13.0).color(MUTED));
                                     let mut vol = cfg.volume_percent as f32;
@@ -301,8 +307,6 @@ impl eframe::App for SuijiApp {
                                     );
                                 });
 
-                                ui.add_space(6.0);
-
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         RichText::new("避开最近播放").size(13.0).color(MUTED),
@@ -318,7 +322,12 @@ impl eframe::App for SuijiApp {
 
                         // Preview grid
                         egui::Frame::NONE
-                            .inner_margin(egui::Margin::symmetric(20, 4))
+                            .inner_margin(egui::Margin {
+                                left: 20,
+                                right: 20,
+                                top: 2,
+                                bottom: 2,
+                            })
                             .show(ui, |ui| {
                                 let n = self.session.ui_count();
                                 let (rows, cols) = crate::tiler::rows_cols(n);
@@ -330,21 +339,21 @@ impl eframe::App for SuijiApp {
                                     .color(FAINT)
                                     .extra_letter_spacing(0.4),
                                 );
-                                ui.add_space(6.0);
+                                ui.add_space(4.0);
 
                                 let files = &snap.current_files;
                                 egui::Frame::NONE
                                     .fill(BG_SOFT)
                                     .stroke(Stroke::new(1.0, LINE))
-                                    .inner_margin(8.0)
+                                    .inner_margin(6.0)
                                     .show(ui, |ui| {
-                                        let gap = 5.0;
+                                        let gap = 4.0;
                                         let total_w = ui.available_width();
                                         let cell_w = ((total_w - gap * (cols as f32 - 1.0))
                                             / cols as f32)
                                             .max(36.0);
-                                        // Cap cell height so tall grids don't explode layout
-                                        let cell_h = (cell_w * 10.0 / 16.0).min(56.0);
+                                        // Compact preview cells
+                                        let cell_h = (cell_w * 10.0 / 16.0).min(48.0);
 
                                         for r in 0..rows {
                                             ui.horizontal(|ui| {
@@ -384,7 +393,7 @@ impl eframe::App for SuijiApp {
 
                         if !snap.last_errors.is_empty() {
                             egui::Frame::NONE
-                                .inner_margin(egui::Margin::symmetric(20, 4))
+                                .inner_margin(egui::Margin::symmetric(20, 2))
                                 .show(ui, |ui| {
                                     ui.colored_label(
                                         Color32::from_rgb(0xB4, 0x53, 0x09),
@@ -396,18 +405,17 @@ impl eframe::App for SuijiApp {
                                     );
                                 });
                         }
-                        ui.add_space(8.0);
                     });
 
-                // ── Footer actions (pinned) ──
+                // ── Footer actions (directly under preview) ──
                 egui::Frame::NONE
                     .fill(BG)
                     .stroke(Stroke::new(1.0, LINE))
                     .inner_margin(egui::Margin {
                         left: 20,
                         right: 20,
-                        top: 12,
-                        bottom: 14,
+                        top: 8,
+                        bottom: 12,
                     })
                     .show(ui, |ui| {
                         let busy = matches!(
