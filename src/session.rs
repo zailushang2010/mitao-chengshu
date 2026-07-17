@@ -357,6 +357,15 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
         g.message = msg;
     }
+
+    // PotPlayer steals focus — pull control panel back after tiling settles
+    thread::spawn(|| {
+        for delay in [200u64, 600, 1200, 2000] {
+            thread::sleep(std::time::Duration::from_millis(delay));
+            crate::tray::force_show_main_window();
+            crate::tray::set_main_window_topmost(true);
+        }
+    });
 }
 
 fn scan_config_roots(roots: &[String], exts: &[String]) -> Library {

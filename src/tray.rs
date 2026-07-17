@@ -1,17 +1,19 @@
-//! System tray: minimize-to-tray and quick actions.
+//! System tray + Win32 window raise helpers.
 //!
-//! Important: when the main window is hidden (`Visible(false)`), eframe may stop
-//! calling `App::update` regularly. Tray handlers therefore restore the window via
-//! Win32 directly and call `Context::request_repaint()` so the UI loop wakes up.
+//! When the main window is hidden, eframe may stop calling `App::update` often.
+//! Tray handlers restore via Win32 and `request_repaint`.
+//! After launching many PotPlayer windows, focus is stolen — use topmost +
+//! AttachThreadInput to bring the control panel back.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::brand::{self, APP_NAME, WINDOW_TITLE};
 use egui::Context;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use windows::Win32::Foundation::HWND;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -24,11 +26,9 @@ pub enum TrayCommand {
 
 pub struct TrayService {
     _tray: TrayIcon,
-    /// Menu items must outlive the tray menu on Windows.
     _menu_items: Vec<MenuItem>,
     pub rx: Receiver<TrayCommand>,
     _tx: Sender<TrayCommand>,
-    /// Shared flag so UI can know we were asked to show (optional).
     pub show_requested: Arc<AtomicBool>,
 }
 
@@ -38,7 +38,7 @@ impl TrayService {
         let show_requested = Arc::new(AtomicBool::new(false));
 
         let menu = Menu::new();
-        let show = MenuItem::new("显示主窗口", true, None);
+        let show = MenuItem::new("显示控制面板", true, None);
         let toggle = MenuItem::new("开启 / 关闭本轮", true, None);
         let reroll = MenuItem::new("再来一轮", true, None);
         let stop = MenuItem::new("关闭本轮", true, None);
@@ -64,7 +64,7 @@ impl TrayService {
         let icon = brand::tray_icon().unwrap_or_else(fallback_tray_icon);
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip(&format!("{APP_NAME}（点击显示窗口）"))
+            .with_tooltip(&format!("{APP_NAME}（点击显示控制面板）"))
             .with_icon(icon)
             .build()
             .map_err(|e| e.to_string())?;
@@ -73,23 +73,30 @@ impl TrayService {
                         ctx: &Context,
                         flag: &AtomicBool,
                         cmd: TrayCommand| {
-            if matches!(cmd, TrayCommand::Show | TrayCommand::Exit) {
-                // Restore HWND immediately — do not wait for App::update.
+            if matches!(
+                cmd,
+                TrayCommand::Show
+                    | TrayCommand::Exit
+                    | TrayCommand::StartOrStop
+                    | TrayCommand::Reroll
+                    | TrayCommand::StopSession
+            ) {
+                // Cut through PotPlayer windows immediately
                 force_show_main_window();
                 flag.store(true, Ordering::SeqCst);
             }
             let _ = tx.send(cmd);
             ctx.request_repaint();
-            // A second kick in case the first paint was missed while hidden.
             let ctx2 = ctx.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                force_show_main_window();
-                ctx2.request_repaint();
+                for delay in [30u64, 120, 350, 800] {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    force_show_main_window();
+                    ctx2.request_repaint();
+                }
             });
         };
 
-        // Menu events
         let tx_menu = tx.clone();
         let ctx_menu = ctx.clone();
         let flag_menu = show_requested.clone();
@@ -111,14 +118,10 @@ impl TrayService {
                 };
                 if let Some(c) = cmd {
                     dispatch(&tx_menu, &ctx_menu, &flag_menu, c);
-                    if matches!(c, TrayCommand::Exit) {
-                        // still keep loop; process will exit from UI
-                    }
                 }
             }
         });
 
-        // Tray icon click / double-click → show
         let tx_icon = tx.clone();
         let ctx_icon = ctx.clone();
         let flag_icon = show_requested.clone();
@@ -157,13 +160,28 @@ impl TrayService {
     }
 }
 
-/// Show / restore the main window by title (works even when eframe marked it invisible).
+/// Show / restore control window above PotPlayer instances.
 pub fn force_show_main_window() {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
-        SW_SHOWNORMAL,
+    let Some(hwnd) = find_main_hwnd() else {
+        return;
     };
+    raise_hwnd(hwnd, true);
+}
+
+/// Keep (or release) always-on-top so the panel stays usable during multi-play.
+pub fn set_main_window_topmost(topmost: bool) {
+    let Some(hwnd) = find_main_hwnd() else {
+        return;
+    };
+    set_topmost(hwnd, topmost);
+    if topmost {
+        raise_hwnd(hwnd, true);
+    }
+}
+
+fn find_main_hwnd() -> Option<HWND> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 
     let title: Vec<u16> = WINDOW_TITLE
         .encode_utf16()
@@ -171,30 +189,55 @@ pub fn force_show_main_window() {
         .collect();
 
     unsafe {
-        let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) else {
-            // Fallback: enum windows containing our brand string
-            if let Some(h) = find_window_containing(APP_NAME) {
-                show_hwnd(h);
+        if let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) {
+            if !hwnd.0.is_null() {
+                return Some(hwnd);
             }
-            return;
-        };
-        if hwnd.0.is_null() {
-            if let Some(h) = find_window_containing(APP_NAME) {
-                show_hwnd(h);
-            }
-            return;
         }
-        show_hwnd(hwnd);
+    }
+    find_window_containing(APP_NAME)
+}
+
+fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
+    use windows::Win32::System::Threading::{
+        AttachThreadInput, GetCurrentThreadId,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP, HWND_TOPMOST,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    };
+
+    unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = ShowWindow(hwnd, SW_SHOW);
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
+
+        // Temporarily TOPMOST so we win over a wall of PotPlayer windows
+        if flash_topmost {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+        }
+
+        // Classic focus-stealing workaround
+        let fg = GetForegroundWindow();
+        let mut fg_pid = 0u32;
+        let fg_tid = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        let cur_tid = GetCurrentThreadId();
+        if fg_tid != 0 && fg_tid != cur_tid {
+            let _ = AttachThreadInput(cur_tid, fg_tid, true);
+        }
+        let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
-        // Nudge z-order
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-        };
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOP),
@@ -204,29 +247,38 @@ pub fn force_show_main_window() {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         );
+        if fg_tid != 0 && fg_tid != cur_tid {
+            let _ = AttachThreadInput(cur_tid, fg_tid, false);
+        }
     }
 }
 
-fn show_hwnd(hwnd: windows::Win32::Foundation::HWND) {
+fn set_topmost(hwnd: HWND, topmost: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+        SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     };
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        let _ = SetForegroundWindow(hwnd);
+        let insert = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
+        let _ = SetWindowPos(
+            hwnd,
+            Some(insert),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
     }
 }
 
-fn find_window_containing(part: &str) -> Option<windows::Win32::Foundation::HWND> {
+fn find_window_containing(part: &str) -> Option<HWND> {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, IsWindowVisible,
-    };
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW};
 
     struct Ctx {
         part: String,
@@ -238,7 +290,6 @@ fn find_window_containing(part: &str) -> Option<windows::Win32::Foundation::HWND
         if ctx.found.is_some() {
             return BOOL(0);
         }
-        // Include hidden windows (IsWindowVisible may be false when in tray)
         let mut buf = [0u16; 512];
         let n = GetWindowTextW(hwnd, &mut buf);
         if n > 0 {
@@ -248,7 +299,6 @@ fn find_window_containing(part: &str) -> Option<windows::Win32::Foundation::HWND
                 return BOOL(0);
             }
         }
-        let _ = IsWindowVisible(hwnd); // silence unused in some builds
         BOOL(1)
     }
 
@@ -263,7 +313,6 @@ fn find_window_containing(part: &str) -> Option<windows::Win32::Foundation::HWND
 }
 
 fn fallback_tray_icon() -> tray_icon::Icon {
-    // Simple peach-ish placeholder if ico decode fails
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {

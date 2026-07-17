@@ -23,6 +23,9 @@ pub struct SuijiApp {
     /// Shrink window height to content for a few frames (kill bottom dead space)
     fit_height_frames: u8,
     last_fit_count: usize,
+    last_phase: SessionPhase,
+    /// User hid to tray; don't auto-raise until they ask
+    user_hid_to_tray: bool,
 }
 
 impl SuijiApp {
@@ -59,11 +62,14 @@ impl SuijiApp {
             boot_frames: 10,
             fit_height_frames: 12,
             last_fit_count,
+            last_phase: SessionPhase::Idle,
+            user_hid_to_tray: false,
         }
     }
 
-    fn show_window(&self, ctx: &egui::Context) {
-        // Win32 first (reliable when hidden), then sync eframe viewport state
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.user_hid_to_tray = false;
+        // Win32 first (cuts through PotPlayer wall), then sync eframe
         crate::tray::force_show_main_window();
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -71,10 +77,11 @@ impl SuijiApp {
         ctx.request_repaint();
     }
 
-    fn hide_to_tray(&self, ctx: &egui::Context) {
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        self.user_hid_to_tray = true;
+        crate::tray::set_main_window_topmost(false);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        // Keep the event loop semi-alive so tray commands can be processed sooner
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        ctx.request_repaint_after(std::time::Duration::from_millis(400));
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
@@ -82,11 +89,20 @@ impl SuijiApp {
             return;
         };
 
-        if tray.show_requested.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let show_req = tray
+            .show_requested
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let mut cmds = Vec::new();
+        while let Ok(cmd) = tray.rx.try_recv() {
+            cmds.push(cmd);
+        }
+        // drop tray borrow before &mut self methods
+        let _ = tray;
+
+        if show_req {
             self.show_window(ctx);
         }
-
-        while let Ok(cmd) = tray.rx.try_recv() {
+        for cmd in cmds {
             match cmd {
                 TrayCommand::Show => self.show_window(ctx),
                 TrayCommand::StartOrStop => {
@@ -96,7 +112,6 @@ impl SuijiApp {
                     } else if phase == SessionPhase::Idle {
                         self.session.start();
                     }
-                    // Ensure window is visible when controlling session from tray
                     self.show_window(ctx);
                 }
                 TrayCommand::Reroll => {
@@ -170,11 +185,28 @@ impl eframe::App for SuijiApp {
         let snap = self.session.snapshot();
         if matches!(
             snap.phase,
-            SessionPhase::Starting | SessionPhase::Stopping
-        ) || !snap.current_files.is_empty()
-        {
+            SessionPhase::Starting | SessionPhase::Stopping | SessionPhase::Playing
+        ) {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
+
+        // After 开启本轮 finishes, PotPlayers steal focus — raise control panel
+        if self.last_phase == SessionPhase::Starting && snap.phase == SessionPhase::Playing {
+            if !self.user_hid_to_tray {
+                self.show_window(ctx);
+                crate::tray::set_main_window_topmost(true);
+            }
+        }
+        // While playing, keep panel on top (unless user chose tray)
+        if snap.phase == SessionPhase::Playing && !self.user_hid_to_tray {
+            crate::tray::set_main_window_topmost(true);
+        }
+        if matches!(snap.phase, SessionPhase::Idle | SessionPhase::Stopping)
+            && self.last_phase == SessionPhase::Playing
+        {
+            crate::tray::set_main_window_topmost(false);
+        }
+        self.last_phase = snap.phase;
 
         self.ensure_thumbs(&snap.current_files, ctx);
         let cfg = self.session.config_clone();
