@@ -1,15 +1,27 @@
+# Build
 /target
 /dist
-/.superpowers
-**/*.rs.bk
-Cargo.lock
-.DS_Store
-Thumbs.db
+
+# Local runtime data (never publish)
 config.json
 history.json
 history_images.json
-
+blacklist.json
+blacklist_images.json
+index_cache/
+thumbs/
+startup.log
 run_err.txt
 run_out.txt
-startup.log
-thumbs/
+*.log
+
+# Tooling / editor
+/.superpowers
+**/*.rs.bk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Note: Cargo.lock IS tracked (application binary)

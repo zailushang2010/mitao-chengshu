@@ -217,13 +217,18 @@ mod tests {
         let _ = fs::remove_dir_all(&b);
     }
 
-    /// Real library smoke test (this machine). Run with:
-    /// `cargo test scan_f_movies -- --ignored --nocapture`
+    /// Optional local smoke test. Set env then run:
+    /// `$env:MITAO_TEST_LIBRARY="D:\Videos"; cargo test scan_local_library_env -- --ignored --nocapture`
     #[test]
     #[ignore]
-    fn scan_f_movies() {
+    fn scan_local_library_env() {
+        let path = std::env::var("MITAO_TEST_LIBRARY").unwrap_or_default();
+        assert!(
+            !path.is_empty(),
+            "set MITAO_TEST_LIBRARY to a folder with videos"
+        );
         let lib = Library::scan(
-            r"F:\电影",
+            &path,
             &[
                 ".mkv".into(),
                 ".mp4".into(),
@@ -236,10 +241,7 @@ mod tests {
                 ".webm".into(),
             ],
         );
-        eprintln!("F:\\电影 indexed = {}", lib.len());
-        assert!(
-            lib.len() > 0,
-            "expected at least one video under F:\\电影"
-        );
+        eprintln!("{path} indexed = {}", lib.len());
+        assert!(!lib.is_empty(), "expected at least one video under {path}");
     }
 }
