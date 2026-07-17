@@ -253,13 +253,19 @@ impl SessionHandle {
         self.rescan();
     }
 
-    pub fn remove_library_path(&self, index: usize) {
+    /// Remove a library root. Returns the removed path for UI feedback.
+    pub fn remove_library_path(&self, index: usize) -> Option<String> {
         let mut g = self.inner.lock().unwrap();
-        g.config.remove_library_path(index);
-        let _ = crate::config::save(&g.config);
-        g.message = "索引中…".into();
+        let removed = g.config.remove_library_path(index);
+        if removed.is_some() {
+            let _ = crate::config::save(&g.config);
+            g.message = "索引中…".into();
+        }
         drop(g);
-        self.rescan();
+        if removed.is_some() {
+            self.rescan();
+        }
+        removed
     }
 
     pub fn set_potplayer_path(&self, path: String) {

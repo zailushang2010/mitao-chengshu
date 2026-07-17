@@ -120,27 +120,25 @@ impl Config {
             };
         }
 
-        // Merge legacy library_path into library_paths
+        // library_paths is authoritative. Only migrate legacy library_path when
+        // library_paths is empty (old configs). Never re-insert a removed path.
         let mut paths: Vec<String> = self
             .library_paths
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let legacy = self.library_path.trim().to_string();
-        if !legacy.is_empty() {
-            let exists = paths
-                .iter()
-                .any(|p| path_key(p) == path_key(&legacy));
-            if !exists {
-                paths.insert(0, legacy);
+        if paths.is_empty() {
+            let legacy = self.library_path.trim().to_string();
+            if !legacy.is_empty() {
+                paths.push(legacy);
             }
         }
         // Dedupe (Windows: case-insensitive)
         let mut seen = std::collections::HashSet::new();
         paths.retain(|p| seen.insert(path_key(p)));
         self.library_paths = paths;
-        // Keep library_path as first root for old tools
+        // Mirror first root for legacy field
         self.library_path = self
             .library_paths
             .first()
@@ -162,14 +160,29 @@ impl Config {
             return;
         }
         self.library_paths.push(path);
+        // Keep library_path in sync without re-merge surprises
+        self.library_path = self
+            .library_paths
+            .first()
+            .cloned()
+            .unwrap_or_default();
         *self = self.clone().normalize();
     }
 
-    pub fn remove_library_path(&mut self, index: usize) {
-        if index < self.library_paths.len() {
-            self.library_paths.remove(index);
-            *self = self.clone().normalize();
+    /// Returns the removed path when successful.
+    pub fn remove_library_path(&mut self, index: usize) -> Option<String> {
+        if index >= self.library_paths.len() {
+            return None;
         }
+        let removed = self.library_paths.remove(index);
+        // Clear legacy field first so normalize cannot resurrect the removed path
+        self.library_path = self
+            .library_paths
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        *self = self.clone().normalize();
+        Some(removed)
     }
 }
 
@@ -273,6 +286,17 @@ mod tests {
         c.add_library_path(r"D:\Movies".into());
         c.add_library_path(r"d:\movies".into());
         assert_eq!(c.library_roots().len(), 1);
+    }
+
+    #[test]
+    fn remove_does_not_resurrect_via_legacy_field() {
+        let mut c = Config::default();
+        c.add_library_path(r"F:\电影".into());
+        assert_eq!(c.library_roots().len(), 1);
+        let removed = c.remove_library_path(0);
+        assert_eq!(removed.as_deref(), Some(r"F:\电影"));
+        assert!(c.library_roots().is_empty(), "must stay empty after remove");
+        assert!(c.library_path.is_empty());
     }
 
     #[test]

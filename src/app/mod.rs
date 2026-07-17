@@ -669,38 +669,66 @@ impl SuijiApp {
                 );
                 ui.add_space(6.0);
 
+                // Always read live roots so remove reflects immediately next paint
                 let roots = self.session.snapshot().library_roots;
                 if roots.is_empty() {
-                    ui.label(
-                        RichText::new("（尚未添加目录）")
-                            .size(12.5)
-                            .color(FAINT),
-                    );
+                    egui::Frame::NONE
+                        .fill(BG_SOFT)
+                        .stroke(Stroke::new(1.0, LINE))
+                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("（尚未添加目录，请点下方「添加文件夹」）")
+                                    .size(13.0)
+                                    .color(MUTED),
+                            );
+                        });
                 } else {
                     egui::ScrollArea::vertical()
-                        .max_height(140.0)
+                        .max_height(160.0)
+                        .id_salt("library_roots_list")
                         .show(ui, |ui| {
                             let mut remove_idx: Option<usize> = None;
                             for (i, root) in roots.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(format!("{}.  {}", i + 1, root))
-                                            .size(12.0)
-                                            .color(INK),
-                                    );
-                                    ui.with_layout(
-                                        Layout::right_to_left(Align::Center),
-                                        |ui| {
-                                            if link_btn(ui, "移除").clicked() {
-                                                remove_idx = Some(i);
-                                            }
-                                        },
-                                    );
-                                });
+                                egui::Frame::NONE
+                                    .fill(BG_SOFT)
+                                    .stroke(Stroke::new(1.0, LINE))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{}.", i + 1))
+                                                        .size(12.0)
+                                                        .color(FAINT),
+                                                );
+                                                ui.label(
+                                                    RichText::new(root.as_str())
+                                                        .size(13.0)
+                                                        .color(INK),
+                                                );
+                                            });
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if mini_text_btn(ui, "移除").clicked() {
+                                                        remove_idx = Some(i);
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    });
                                 ui.add_space(4.0);
                             }
                             if let Some(i) = remove_idx {
-                                self.session.remove_library_path(i);
+                                let name = roots.get(i).cloned().unwrap_or_default();
+                                if let Some(removed) = self.session.remove_library_path(i) {
+                                    let short = truncate_path(&removed, 28);
+                                    self.show_toast(format!("已移除片库：{short}"));
+                                    self.fit_height_frames = 3;
+                                } else if !name.is_empty() {
+                                    self.show_toast(format!("移除失败：{}", truncate_path(&name, 24)));
+                                }
                             }
                         });
                 }
@@ -711,8 +739,10 @@ impl SuijiApp {
                     .clicked()
                 {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.session
-                            .add_library_path(folder.to_string_lossy().to_string());
+                        let p = folder.to_string_lossy().to_string();
+                        self.session.add_library_path(p.clone());
+                        self.show_toast(format!("已添加片库：{}", truncate_path(&p, 28)));
+                        self.fit_height_frames = 3;
                     }
                 }
                 ui.add_space(4.0);
