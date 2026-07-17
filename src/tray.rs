@@ -15,6 +15,10 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::HWND;
 
+/// Desired "always on top" for the control panel (播放时置顶).
+/// Win32 raise helpers read this so a flash-to-front does not permanently clear TOPMOST.
+static PIN_DESIRED: AtomicBool = AtomicBool::new(false);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
     Show,
@@ -161,7 +165,7 @@ impl TrayService {
 }
 
 /// Show / restore control window above PotPlayer instances.
-/// Flash TOPMOST then clear — caller may re-pin with `set_main_window_topmost(true)`.
+/// If pin is desired, leaves TOPMOST on; otherwise flashes then clears.
 pub fn force_show_main_window() {
     let _ = force_show_main_window_result();
 }
@@ -171,8 +175,11 @@ pub fn force_show_main_window_result() -> bool {
     let Some(hwnd) = find_main_hwnd() else {
         return false;
     };
-    raise_hwnd(hwnd, true);
-    set_topmost(hwnd, false);
+    let keep = PIN_DESIRED.load(Ordering::SeqCst);
+    raise_hwnd(hwnd, true, keep);
+    if !keep {
+        set_topmost(hwnd, false);
+    }
     true
 }
 
@@ -181,17 +188,26 @@ pub fn force_show_and_pin() {
     let Some(hwnd) = find_main_hwnd() else {
         return;
     };
-    raise_hwnd(hwnd, true);
+    // Ensure subsequent tray force_show paths also keep pin.
+    PIN_DESIRED.store(true, Ordering::SeqCst);
+    raise_hwnd(hwnd, true, true);
     set_topmost(hwnd, true);
 }
 
-/// Explicitly set/clear always-on-top.
-/// Does NOT restore/show — safe to call while minimized (only clears z-order flag).
+/// Authoritative pin intent. Updates both the atomic (for raise helpers) and HWND.
+/// Prefer also sending `ViewportCommand::WindowLevel` from the UI thread so winit
+/// keeps `ALWAYS_ON_TOP` in sync — otherwise the next winit flag apply can wipe TOPMOST.
 pub fn set_main_window_topmost(topmost: bool) {
+    PIN_DESIRED.store(topmost, Ordering::SeqCst);
     let Some(hwnd) = find_main_hwnd() else {
         return;
     };
     set_topmost(hwnd, topmost);
+}
+
+/// Whether the app currently wants the panel always-on-top.
+pub fn pin_desired() -> bool {
+    PIN_DESIRED.load(Ordering::SeqCst)
 }
 
 fn find_main_hwnd() -> Option<HWND> {
@@ -213,13 +229,14 @@ fn find_main_hwnd() -> Option<HWND> {
     find_window_containing(APP_NAME)
 }
 
-fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
+/// Raise window; if `keep_topmost` leave HWND_TOPMOST after focus steal, else clear it.
+fn raise_hwnd(hwnd: HWND, flash_topmost: bool, keep_topmost: bool) {
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
-        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
+        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST,
         SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     };
 
@@ -230,10 +247,8 @@ fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
 
-        use windows::Win32::UI::WindowsAndMessaging::HWND_NOTOPMOST;
-
-        // Brief TOPMOST to surface above PotPlayer, then always clear it
-        if flash_topmost {
+        // Surface above PotPlayer with a brief TOPMOST (or keep it for pin mode)
+        if flash_topmost || keep_topmost {
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -255,10 +270,15 @@ fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
         }
         let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
-        // Release always-on-top so user can minimize / switch windows
+        // Keep pin when requested; otherwise release so user can minimize / switch
+        let insert = if keep_topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
         let _ = SetWindowPos(
             hwnd,
-            Some(HWND_NOTOPMOST),
+            Some(insert),
             0,
             0,
             0,
@@ -273,8 +293,9 @@ fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
 
 fn set_topmost(hwnd: HWND, topmost: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     };
+    // Match winit: z-order only — no SWP_SHOWWINDOW (would fight minimize).
     unsafe {
         let insert = if topmost {
             HWND_TOPMOST
@@ -288,7 +309,7 @@ fn set_topmost(hwnd: HWND, topmost: bool) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }

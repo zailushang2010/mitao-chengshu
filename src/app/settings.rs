@@ -278,6 +278,50 @@ impl SuijiApp {
 
                 ui.add_space(14.0);
                 ui.label(
+                    RichText::new("平铺工作区（电影多开落在哪块屏）")
+                        .size(13.0)
+                        .color(MUTED),
+                );
+                ui.add_space(4.0);
+                {
+                    let cur = self.session.config_clone().tile_monitor_index;
+                    let monitors = crate::tiler::list_monitors();
+                    let sel_label = if cur < 0 {
+                        "系统主工作区（默认）".to_string()
+                    } else if let Some(m) = monitors.get(cur as usize) {
+                        m.label()
+                    } else {
+                        format!("显示器 #{}（当前不可用，将回退）", cur + 1)
+                    };
+                    egui::ComboBox::from_id_salt("tile_monitor")
+                        .selected_text(sel_label)
+                        .width(ui.available_width().min(420.0))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(cur < 0, "系统主工作区（默认）")
+                                .clicked()
+                            {
+                                self.session.set_tile_monitor_index(-1);
+                            }
+                            for m in &monitors {
+                                let lab = m.label();
+                                if ui
+                                    .selectable_label(cur == m.index as i32, &lab)
+                                    .clicked()
+                                {
+                                    self.session.set_tile_monitor_index(m.index as i32);
+                                }
+                            }
+                        });
+                }
+                ui.label(
+                    RichText::new("仅影响 PotPlayer 网格；控制面板窗口仍可拖到任意屏")
+                        .size(11.0)
+                        .color(FAINT),
+                );
+
+                ui.add_space(14.0);
+                ui.label(
                     RichText::new("PotPlayer 路径（电影模式，可留空自动探测）")
                         .size(13.0)
                         .color(MUTED),

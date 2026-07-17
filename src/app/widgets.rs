@@ -32,10 +32,11 @@ pub(crate) fn mode_chip(ui: &mut egui::Ui, label: &str, active: bool, on_click: 
     } else {
         Stroke::new(1.0, LINE_STRONG)
     };
+    // Compact enough for workbench toolbar; still easy to hit.
     let btn = egui::Button::new(RichText::new(label).size(13.0).color(fg))
         .fill(fill)
         .stroke(stroke)
-        .min_size(Vec2::new(72.0, 30.0));
+        .min_size(Vec2::new(56.0, 32.0));
     if ui.add(btn).clicked() {
         on_click();
     }
@@ -296,6 +297,8 @@ pub(crate) enum IconKind {
     Rescan,
     Tray,
     Pin,
+    /// Workbench ops rail show/hide
+    Sidebar,
 }
 
 pub(crate) fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
@@ -401,6 +404,20 @@ pub(crate) fn icon_btn_toggle(ui: &mut egui::Ui, kind: IconKind, tip: &str, acti
                 s,
             );
         }
+        IconKind::Sidebar => {
+            // Workbench: narrow left rail + wide main pane
+            let left = egui::Rect::from_min_max(
+                egui::pos2(c.x - 9.0, c.y - 8.0),
+                egui::pos2(c.x - 2.5, c.y + 8.0),
+            );
+            let right = egui::Rect::from_min_max(
+                egui::pos2(c.x - 0.5, c.y - 8.0),
+                egui::pos2(c.x + 9.0, c.y + 8.0),
+            );
+            ui.painter().rect_filled(left, 1.0, ink);
+            ui.painter()
+                .rect_stroke(right, 1.0, s, egui::StrokeKind::Outside);
+        }
     }
 
     resp.on_hover_text(tip)
@@ -463,12 +480,7 @@ pub(crate) fn preview_cell(
 }
 
 pub(crate) fn truncate_path(s: &str, max_chars: usize) -> String {
-    let p = Path::new(s);
-    let display = p
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| s.to_string());
+    let display = file_title(s);
     let count = display.chars().count();
     if count <= max_chars {
         display
@@ -477,4 +489,99 @@ pub(crate) fn truncate_path(s: &str, max_chars: usize) -> String {
         let t: String = display.chars().take(take).collect();
         format!("{t}…")
     }
+}
+
+/// File title for UI lists: stem only, no extension / path noise.
+pub(crate) fn file_title(s: &str) -> String {
+    let p = Path::new(s);
+    p.file_stem()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+        })
+        .unwrap_or_else(|| s.to_string())
+}
+
+/// Sidebar list row: one line — index · title… · actions.
+/// Keeps workbench density; actions sit on the right without a second empty row.
+/// Call `actions` with right-to-left order (first drawn = rightmost).
+pub(crate) fn sidebar_list_row(
+    ui: &mut egui::Ui,
+    index: usize,
+    title: &str,
+    // Reserve width for action buttons so the title truncates cleanly.
+    actions_w: f32,
+    actions: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::NONE
+        .fill(BG_SOFT)
+        .stroke(Stroke::new(1.0, LINE))
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                ui.spacing_mut().item_spacing.x = 4.0;
+
+                ui.label(
+                    RichText::new(format!("{index}."))
+                        .size(11.0)
+                        .color(MUTED)
+                        .strong(),
+                );
+
+                // Title takes leftover width after actions; truncate + single hover tip.
+                let title_w = (ui.available_width() - actions_w - 4.0).max(36.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(title_w, 20.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_max_width(title_w);
+                        ui.add(
+                            egui::Label::new(RichText::new(title).size(12.0).color(INK)).truncate(),
+                        );
+                    },
+                );
+
+                ui.with_layout(Layout::right_to_left(Align::Center), actions);
+            });
+        });
+}
+
+/// Compact text action for dense sidebar rows (smaller than mini_text_btn).
+pub(crate) fn row_action_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let pad = Vec2::new(7.0, 3.0);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(11.5),
+        INK,
+    );
+    let size = galley.size() + pad * 2.0;
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let fill = if pressed {
+        Color32::from_rgb(0xD6, 0xD0, 0xC6)
+    } else if resp.hovered() {
+        BG
+    } else {
+        Color32::TRANSPARENT
+    };
+    let stroke = if resp.hovered() || pressed {
+        Stroke::new(1.0, MUTED)
+    } else {
+        Stroke::new(1.0, LINE)
+    };
+    ui.painter().rect_filled(draw, 2.0, fill);
+    ui.painter()
+        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
+    ui.painter().galley(
+        egui::pos2(draw.left() + pad.x, draw.top() + pad.y),
+        galley,
+        INK,
+    );
+    resp
 }

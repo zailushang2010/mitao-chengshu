@@ -16,8 +16,8 @@ use crate::tray::{TrayCommand, TrayService};
 use theme::{BG, BG_SOFT, FAINT, INK, LINE, MUTED, ON_INK};
 use widgets::{toggle, 
     ease_out_cubic, icon_btn, icon_btn_toggle, is_image_path, load_texture, mini_text_btn,
-    mode_chip, preview_cell, primary_btn, secondary_btn, small_step_btn, status_pill,
-    truncate_path, IconKind,
+    file_title, mode_chip, preview_cell, primary_btn, row_action_btn, secondary_btn,
+    sidebar_list_row, small_step_btn, status_pill, truncate_path, IconKind,
 };
 
 pub struct SuijiApp {
@@ -34,7 +34,9 @@ pub struct SuijiApp {
     force_quit: bool,
     /// First frames: force visible + focus so user always sees the window
     boot_frames: u8,
-    /// Shrink window height to content for a few frames (kill bottom dead space)
+    /// After size settle, center once on the monitor (boot / first show).
+    need_center: bool,
+    /// Nudge window height to content for a few frames (rare; landscape is mostly fixed).
     fit_height_frames: u8,
     last_fit_count: usize,
     last_media_mode: MediaMode,
@@ -45,7 +47,13 @@ pub struct SuijiApp {
     toast: Option<ToastState>,
     /// While playing movies, keep panel above PotPlayer
     pin_while_playing: bool,
+    /// Last WindowLevel we applied (avoid redundant viewport cmds; detect HWND drift)
+    pin_level_applied: bool,
     window_was_minimized: bool,
+    /// Workbench: ops rail desired open state.
+    sidebar_open: bool,
+    /// 0..=1 visual width of ops rail (animated).
+    sidebar_vis: f32,
     /// In-app image slideshow
     slide_index: usize,
     slide_elapsed: f32,
@@ -73,6 +81,11 @@ const TOAST_EXIT: f32 = 0.18;
 /// Settings panel: open slower than close (Emil asymmetric enter/exit).
 const SETTINGS_OPEN_SECS: f32 = 0.20;
 const SETTINGS_CLOSE_SECS: f32 = 0.12;
+/// Workbench ops rail width when fully open.
+const SIDEBAR_W: f32 = 268.0;
+/// Sidebar width animation (asymmetric).
+const SIDEBAR_OPEN_SECS: f32 = 0.18;
+const SIDEBAR_CLOSE_SECS: f32 = 0.12;
 
 impl SuijiApp {
     pub fn new(
@@ -120,15 +133,19 @@ impl SuijiApp {
             textures: HashMap::new(),
             tray,
             force_quit: false,
-            boot_frames: 10,
-            fit_height_frames: 12,
+            boot_frames: 8,
+            need_center: true,
+            fit_height_frames: 0,
             last_fit_count,
             last_media_mode,
             last_phase: SessionPhase::Idle,
             user_hid_to_tray: false,
             toast,
             pin_while_playing: true,
+            pin_level_applied: false,
             window_was_minimized: false,
+            sidebar_open: true,
+            sidebar_vis: 1.0,
             slide_index: 0,
             slide_elapsed: 0.0,
             slide_paused: false,
@@ -181,8 +198,10 @@ impl SuijiApp {
         // Pin only matters for movie + PotPlayer
         if self.playing_now() && self.pin_while_playing && !self.is_image_mode() {
             crate::tray::force_show_and_pin();
+            self.apply_window_level(ctx, true);
         } else {
             crate::tray::force_show_main_window();
+            self.apply_window_level(ctx, false);
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -193,9 +212,23 @@ impl SuijiApp {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.user_hid_to_tray = true;
         self.window_was_minimized = false;
-        crate::tray::set_main_window_topmost(false);
+        self.apply_window_level(ctx, false);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         ctx.request_repaint_after(std::time::Duration::from_millis(400));
+    }
+
+    /// Keep winit ALWAYS_ON_TOP and Win32 HWND in sync. Bare SetWindowPos alone is
+    /// wiped the next time winit reapplies window flags.
+    fn apply_window_level(&mut self, ctx: &egui::Context, on: bool) {
+        if self.pin_level_applied != on {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if on {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
+            self.pin_level_applied = on;
+        }
+        crate::tray::set_main_window_topmost(on);
     }
 
     /// Pin above players while Playing movies, but release on minimize so taskbar works.
@@ -203,36 +236,38 @@ impl SuijiApp {
         let minimized = ctx.input(|i| i.viewport().minimized == Some(true));
 
         // Image slideshow is in-app — no sticky topmost needed
-        if self.is_image_mode()
-            || phase != SessionPhase::Playing
-            || self.user_hid_to_tray
-            || !self.pin_while_playing
-        {
-            if self.last_phase == SessionPhase::Playing || !self.pin_while_playing {
-                crate::tray::set_main_window_topmost(false);
+        let want_pin = !self.is_image_mode()
+            && phase == SessionPhase::Playing
+            && !self.user_hid_to_tray
+            && self.pin_while_playing
+            && !minimized;
+
+        if !want_pin {
+            // Drop pin when idle / image / tray / user turned off / minimized
+            if self.pin_level_applied
+                || crate::tray::pin_desired()
+                || self.last_phase == SessionPhase::Playing
+                || !self.pin_while_playing
+            {
+                self.apply_window_level(ctx, false);
             }
             self.window_was_minimized = minimized;
             return;
         }
 
-        // Playing + pin enabled
-        if minimized {
-            if !self.window_was_minimized {
-                // User clicked minimize — must drop TOPMOST or it fights the system
-                crate::tray::set_main_window_topmost(false);
-            }
-            self.window_was_minimized = true;
+        // Playing + pin enabled + visible
+        if self.window_was_minimized {
+            // Restored from taskbar — raise above PotPlayers and pin again
+            crate::tray::force_show_and_pin();
+            self.window_was_minimized = false;
+            // Force winit re-apply even if it already thought we were topmost
+            self.pin_level_applied = false;
+            self.apply_window_level(ctx, true);
+        } else if !self.pin_level_applied || !crate::tray::pin_desired() {
+            self.apply_window_level(ctx, true);
         } else {
-            if self.window_was_minimized {
-                // Restored from taskbar — raise above PotPlayers and pin again
-                crate::tray::force_show_and_pin();
-                self.window_was_minimized = false;
-            } else if self.last_phase == SessionPhase::Starting {
-                crate::tray::set_main_window_topmost(true);
-            } else {
-                // Stay above players without restoring (won't undo minimize)
-                crate::tray::set_main_window_topmost(true);
-            }
+            // HWND may have been cleared by a flash-raise; re-assert z-order cheaply
+            crate::tray::set_main_window_topmost(true);
         }
     }
 
@@ -334,6 +369,28 @@ impl eframe::App for SuijiApp {
         if self.boot_frames > 0 {
             self.boot_frames -= 1;
             self.show_window(ctx);
+            // Re-assert center while monitor metrics become available
+            self.need_center = true;
+            ctx.request_repaint();
+        }
+
+        if self.need_center {
+            if let Some(cmd) = egui::ViewportCommand::center_on_screen(ctx) {
+                ctx.send_viewport_cmd(cmd);
+                self.need_center = false;
+            }
+        }
+
+        // Workbench ops rail width (ease-out open, faster close)
+        if self.sidebar_open {
+            if self.sidebar_vis < 1.0 {
+                self.sidebar_vis =
+                    (self.sidebar_vis + dt / SIDEBAR_OPEN_SECS).min(1.0);
+                ctx.request_repaint();
+            }
+        } else if self.sidebar_vis > 0.0 {
+            self.sidebar_vis =
+                (self.sidebar_vis - dt / SIDEBAR_CLOSE_SECS).max(0.0);
             ctx.request_repaint();
         }
 
@@ -492,94 +549,175 @@ impl eframe::App for SuijiApp {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
 
-                // Pack everything in one vertical column — no ScrollArea (it was leaving a tall empty band).
+                // Workbench chrome: compact single-row toolbar (not magazine title stack).
                 let stack = ui.vertical(|ui| {
-                    // ── Header ──
+                    // ── Toolbar ──
                     egui::Frame::NONE
+                        .fill(Color32::from_rgb(0xF7, 0xF3, 0xEC))
                         .inner_margin(egui::Margin {
-                            left: 18,
-                            right: 14,
-                            top: 10,
-                            bottom: 6,
+                            left: 12,
+                            right: 12,
+                            top: 8,
+                            bottom: 8,
                         })
                         .show(ui, |ui| {
-                            // Mode switch
                             ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.set_min_height(40.0);
+
+                                // Ops rail toggle
+                                let rail_tip = if self.sidebar_open {
+                                    "隐藏操作栏"
+                                } else {
+                                    "显示操作栏"
+                                };
+                                if icon_btn_toggle(
+                                    ui,
+                                    IconKind::Sidebar,
+                                    rail_tip,
+                                    self.sidebar_open,
+                                )
+                                .clicked()
+                                {
+                                    self.sidebar_open = !self.sidebar_open;
+                                }
+
+                                // Mode switch — primary workbench context
                                 mode_chip(
                                     ui,
                                     "电影",
                                     snap.media_mode == MediaMode::Movie,
                                     || {
-                                        // Instant switch: no texture wipe, no window thrash, no toast reflow.
                                         self.session.set_media_mode(MediaMode::Movie);
                                         self.clear_slides();
                                     },
                                 );
-                                ui.add_space(6.0);
                                 mode_chip(
                                     ui,
                                     "图片",
                                     snap.media_mode == MediaMode::Image,
                                     || {
-                                        // Plan A: PotPlayers keep running in background.
                                         self.session.set_media_mode(MediaMode::Image);
                                         self.clear_slides();
-                                        // Don't pin control panel over image UX.
-                                        crate::tray::set_main_window_topmost(false);
+                                        self.apply_window_level(ctx, false);
                                     },
                                 );
-                            });
-                            if snap.movie_in_background {
-                                ui.add_space(6.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "电影仍在后台播放 · {} 部 · 切回「电影」可关闭本轮",
-                                            snap.movie_background_count
-                                        ))
+
+                                // Hairline
+                                ui.add_space(4.0);
+                                let sep_h = 22.0;
+                                let (sep_rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(1.0, sep_h), Sense::hover());
+                                ui.painter().line_segment(
+                                    [
+                                        egui::pos2(sep_rect.center().x, sep_rect.center().y - 9.0),
+                                        egui::pos2(sep_rect.center().x, sep_rect.center().y + 9.0),
+                                    ],
+                                    Stroke::new(1.0, LINE),
+                                );
+                                ui.add_space(4.0);
+
+                                // 本轮数量 — primary workbench control, always in toolbar
+                                let (cmin, cmax) = cfg.count_bounds_for(snap.media_mode);
+                                let count = self.session.ui_count();
+                                ui.label(
+                                    RichText::new("本轮数量")
                                         .size(12.0)
                                         .color(MUTED),
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if mini_text_btn(ui, "关掉电影").clicked() {
-                                            self.session.stop_background_movie();
-                                            self.show_toast("已关闭后台电影");
-                                        }
-                                    });
-                                });
-                            }
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new(match snap.media_mode {
-                                            MediaMode::Movie => "随机片库 · PotPlayer",
-                                            MediaMode::Image => "随机图库 · 内置幻灯",
-                                        })
-                                        .size(10.5)
-                                        .color(FAINT)
-                                        .extra_letter_spacing(1.5),
-                                    );
-                                    ui.add_space(1.0);
-                                    ui.label(
-                                        RichText::new(match snap.media_mode {
-                                            MediaMode::Movie => "今日片单",
-                                            MediaMode::Image => "今日图集",
-                                        })
-                                        .size(28.0)
+                                );
+                                ui.label(
+                                    RichText::new(format!("({cmin}–{cmax})"))
+                                        .size(11.0)
+                                        .color(FAINT),
+                                );
+                                if small_step_btn(ui, "−").clicked() {
+                                    self.session.set_ui_count(count.saturating_sub(1));
+                                }
+                                ui.label(
+                                    RichText::new(format!("{count}"))
+                                        .size(18.0)
                                         .color(INK)
                                         .strong(),
-                                    );
-                                });
+                                );
+                                if small_step_btn(ui, "+").clicked() {
+                                    self.session.set_ui_count(count + 1);
+                                }
+
+                                // Hairline
+                                ui.add_space(4.0);
+                                let (sep2, _) =
+                                    ui.allocate_exact_size(Vec2::new(1.0, sep_h), Sense::hover());
+                                ui.painter().line_segment(
+                                    [
+                                        egui::pos2(sep2.center().x, sep2.center().y - 9.0),
+                                        egui::pos2(sep2.center().x, sep2.center().y + 9.0),
+                                    ],
+                                    Stroke::new(1.0, LINE),
+                                );
+                                ui.add_space(4.0);
+
+                                // Status + library meta
+                                status_pill(ui, snap.phase, &snap.message);
+
+                                let unit = match snap.media_mode {
+                                    MediaMode::Movie => "部",
+                                    MediaMode::Image => "张",
+                                };
+                                let root_label = if snap.library_roots.is_empty() {
+                                    "未设置片库".to_string()
+                                } else if snap.library_roots.len() == 1 {
+                                    truncate_path(&snap.library_roots[0], 18)
+                                } else {
+                                    format!(
+                                        "{} 等{}个",
+                                        truncate_path(&snap.library_roots[0], 12),
+                                        snap.library_roots.len()
+                                    )
+                                };
+                                let lib_line = if snap.indexing {
+                                    if snap.indexing_found > 0 {
+                                        format!(
+                                            "{root_label} · 索引中 {} {unit}",
+                                            snap.indexing_found
+                                        )
+                                    } else {
+                                        format!("{root_label} · 索引中…")
+                                    }
+                                } else {
+                                    format!("{root_label} · {} {unit}", snap.library_count)
+                                };
+                                // Cap meta width so icon cluster never gets shoved off
+                                let meta_w = (ui.available_width() - 200.0).clamp(80.0, 360.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(meta_w, 20.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        ui.set_max_width(meta_w);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(lib_line).size(12.0).color(MUTED),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+
+                                if snap.indexing {
+                                    if mini_text_btn(ui, "取消").clicked() {
+                                        self.session.cancel_scan();
+                                        self.show_toast("已取消索引");
+                                    }
+                                }
+
+                                // Right: tools
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
                                     if self.tray.is_some() {
                                         if icon_btn(ui, IconKind::Tray, "最小化到托盘").clicked()
                                         {
                                             self.hide_to_tray(ctx);
                                         }
-                                        ui.add_space(4.0);
                                     }
-                                    // Pin only for movie + PotPlayer
                                     if snap.media_mode == MediaMode::Movie {
                                         let pin_tip = if self.pin_while_playing {
                                             "播放时置顶：开（点此关闭）"
@@ -596,23 +734,23 @@ impl eframe::App for SuijiApp {
                                         {
                                             self.pin_while_playing = !self.pin_while_playing;
                                             if !self.pin_while_playing {
-                                                crate::tray::set_main_window_topmost(false);
+                                                self.apply_window_level(ctx, false);
                                                 self.show_toast("已关闭播放时置顶");
                                             } else {
                                                 if self.playing_now() && !self.user_hid_to_tray {
                                                     crate::tray::force_show_and_pin();
+                                                    self.pin_level_applied = false;
+                                                    self.apply_window_level(ctx, true);
                                                 }
                                                 self.show_toast(
                                                     "已开启播放时置顶（最小化时会自动取消）",
                                                 );
                                             }
                                         }
-                                        ui.add_space(4.0);
                                     }
                                     if icon_btn(ui, IconKind::Rescan, "重新扫描片库").clicked() {
                                         self.session.rescan();
                                     }
-                                    ui.add_space(4.0);
                                     if icon_btn(ui, IconKind::Settings, "片库与设置").clicked() {
                                         self.show_settings = true;
                                         self.pot_path_edit =
@@ -621,476 +759,594 @@ impl eframe::App for SuijiApp {
                                 });
                             });
 
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                status_pill(ui, snap.phase, &snap.message);
-                                ui.add_space(8.0);
-                                let root_label = if snap.library_roots.is_empty() {
-                                    "未设置片库".to_string()
-                                } else if snap.library_roots.len() == 1 {
-                                    truncate_path(&snap.library_roots[0], 28)
-                                } else {
-                                    format!(
-                                        "{} 等 {} 个目录",
-                                        truncate_path(&snap.library_roots[0], 16),
-                                        snap.library_roots.len()
-                                    )
-                                };
-                                let lib_line = if snap.indexing {
-                                    let unit = match snap.media_mode {
-                                        MediaMode::Movie => "部",
-                                        MediaMode::Image => "张",
-                                    };
-                                    if snap.indexing_found > 0 {
-                                        format!(
-                                            "{root_label} · 索引中 已发现 {} {unit}",
-                                            snap.indexing_found
-                                        )
-                                    } else {
-                                        format!("{root_label} · 索引中…")
-                                    }
-                                } else {
-                                    let unit = match snap.media_mode {
-                                        MediaMode::Movie => "部",
-                                        MediaMode::Image => "张",
-                                    };
-                                    format!("{root_label} · {} {unit}", snap.library_count)
-                                };
-                                ui.label(
-                                    RichText::new(lib_line).size(12.0).color(MUTED),
-                                );
-                                if snap.indexing {
-                                    ui.add_space(6.0);
-                                    if mini_text_btn(ui, "取消索引").clicked() {
-                                        self.session.cancel_scan();
-                                        self.show_toast("已取消索引");
-                                    }
-                                }
-                            });
-                        });
-
-                    ui.add(egui::Separator::default().spacing(4.0));
-
-                    // ── Controls ──
-                    egui::Frame::NONE
-                        .inner_margin(egui::Margin::symmetric(18, 6))
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 5.0;
-                            ui.horizontal(|ui| {
-                                let (cmin, cmax) = cfg.count_bounds_for(snap.media_mode);
-                                ui.label(
-                                    RichText::new(format!(
-                                        "本轮数量（{}–{}）",
-                                        cmin, cmax
-                                    ))
-                                    .size(13.0)
-                                    .color(MUTED),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    let count = self.session.ui_count();
-                                    if small_step_btn(ui, "+").clicked() {
-                                        self.session.set_ui_count(count + 1);
-                                    }
-                                    ui.label(
-                                        RichText::new(format!("{count}"))
-                                            .size(18.0)
-                                            .color(INK)
-                                            .strong(),
-                                    );
-                                    if small_step_btn(ui, "−").clicked() {
-                                        self.session.set_ui_count(count.saturating_sub(1));
-                                    }
-                                });
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("避开最近播放").size(13.0).color(MUTED),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    let mut avoid = cfg.avoid_recent;
-                                    if toggle(ui, &mut avoid) {
-                                        self.session.set_avoid_recent(avoid);
-                                    }
-                                });
-                            });
-                        });
-
-                    // ── Preview (slate before play / playing set) ──
-                    egui::Frame::NONE
-                        .inner_margin(egui::Margin {
-                            left: 18,
-                            right: 18,
-                            top: 2,
-                            bottom: 4,
-                        })
-                        .show(ui, |ui| {
-                            let files = &snap.current_files;
-                            let n = if files.is_empty() {
-                                self.session.ui_count()
-                            } else {
-                                files.len()
-                            };
-                            let (rows, cols) = crate::tiler::rows_cols(n.max(1));
-                            let preview_hint = if snap.phase == SessionPhase::Playing {
-                                format!("正在播放 · {rows}×{cols}")
-                            } else if snap.has_preview {
-                                format!("预览片单 · {rows}×{cols} · 未开播")
-                            } else {
-                                format!("本轮预览 · 空 · 点「随机预览」生成 {n} 部")
-                            };
-                            ui.label(
-                                RichText::new(preview_hint)
-                                    .size(11.0)
-                                    .color(FAINT)
-                                    .extra_letter_spacing(0.3),
-                            );
-                            ui.add_space(3.0);
-
-                            egui::Frame::NONE
-                                .fill(BG_SOFT)
-                                .stroke(Stroke::new(1.0, LINE))
-                                .inner_margin(8.0)
-                                .show(ui, |ui| {
-                                    let gap = 6.0;
-                                    let total_w = ui.available_width();
-                                    let cell_w = ((total_w - gap * (cols as f32 - 1.0))
-                                        / cols as f32)
-                                        .max(48.0);
-                                    let cell_h = (cell_w * 10.0 / 16.0).clamp(78.0, 118.0);
-
-                                    for r in 0..rows {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = gap;
-                                            for c in 0..cols {
-                                                let idx = r * cols + c;
-                                                if idx >= n {
-                                                    ui.allocate_exact_size(
-                                                        Vec2::new(cell_w, cell_h),
-                                                        Sense::hover(),
-                                                    );
-                                                    continue;
-                                                }
-                                                let path_opt = files.get(idx);
-                                                let label = path_opt
-                                                    .and_then(|p| {
-                                                        p.file_name().map(|n| {
-                                                            n.to_string_lossy().to_string()
-                                                        })
-                                                    })
-                                                    .unwrap_or_default();
-                                                let tex = path_opt.and_then(|p| {
-                                                    self.textures
-                                                        .get(&p.to_string_lossy().to_string())
-                                                });
-                                                preview_cell(ui, cell_w, cell_h, &label, tex);
-                                            }
-                                        });
-                                        if r + 1 < rows {
-                                            ui.add_space(gap);
-                                        }
-                                    }
-                                });
-                        });
-
-                    if !snap.last_errors.is_empty() {
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(18.0);
-                            ui.colored_label(
-                                Color32::from_rgb(0xB4, 0x53, 0x09),
-                                RichText::new(format!(
-                                    "注意：{} 项启动异常",
-                                    snap.last_errors.len()
-                                ))
-                                .size(12.0),
-                            );
-                        });
-                    }
-
-                    // ── List ops: preview remove OR playing controls ──
-                    if snap.phase == SessionPhase::Idle && snap.has_preview {
-                        ui.add_space(4.0);
-                        egui::Frame::NONE
-                            .inner_margin(egui::Margin {
-                                left: 18,
-                                right: 18,
-                                top: 0,
-                                bottom: 2,
-                            })
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new("预览片单 · 剔除仅本轮 · 拉黑后不再抽到")
-                                        .size(11.0)
-                                        .color(FAINT),
-                                );
-                                ui.add_space(3.0);
-                                egui::ScrollArea::vertical()
-                                    .max_height(120.0)
-                                    .auto_shrink([false, true])
-                                    .show(ui, |ui| {
-                                        let mut remove_idx: Option<usize> = None;
-                                        let mut ban_idx: Option<usize> = None;
-                                        for (i, path) in snap.current_files.iter().enumerate() {
-                                            let name = path
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().to_string())
-                                                .unwrap_or_else(|| path.display().to_string());
-                                            egui::Frame::NONE
-                                                .fill(BG_SOFT)
-                                                .stroke(Stroke::new(1.0, LINE))
-                                                .inner_margin(egui::Margin::symmetric(8, 5))
-                                                .show(ui, |ui| {
-                                                    ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            RichText::new(format!(
-                                                                "{}. {}",
-                                                                i + 1,
-                                                                truncate_path(&name, 20)
-                                                            ))
-                                                            .size(12.0)
-                                                            .color(INK),
-                                                        );
-                                                        ui.with_layout(
-                                                            Layout::right_to_left(Align::Center),
-                                                            |ui| {
-                                                                if mini_text_btn(ui, "拉黑")
-                                                                    .clicked()
-                                                                {
-                                                                    ban_idx = Some(i);
-                                                                }
-                                                                if mini_text_btn(ui, "剔除")
-                                                                    .clicked()
-                                                                {
-                                                                    remove_idx = Some(i);
-                                                                }
-                                                            },
-                                                        );
-                                                    });
-                                                });
-                                            ui.add_space(3.0);
-                                        }
-                                        if let Some(i) = ban_idx {
-                                            if let Some(p) = self.session.blacklist_preview_item(i)
-                                            {
-                                                let short = truncate_path(
-                                                    &p.file_name()
-                                                        .map(|n| n.to_string_lossy().to_string())
-                                                        .unwrap_or_default(),
-                                                    20,
-                                                );
-                                                self.fit_height_frames = 4;
-                                                self.show_toast(format!("已拉黑：{short}"));
-                                            }
-                                        } else if let Some(i) = remove_idx {
-                                            self.session.remove_preview_item(i);
-                                            self.fit_height_frames = 4;
-                                            self.show_toast("已从预览中剔除");
-                                        }
-                                    });
-                            });
-                    }
-
-                    if snap.phase == SessionPhase::Playing && !snap.items.is_empty() {
-                        ui.add_space(4.0);
-                        egui::Frame::NONE
-                            .inner_margin(egui::Margin {
-                                left: 18,
-                                right: 18,
-                                top: 0,
-                                bottom: 2,
-                            })
-                            .show(ui, |ui| {
+                            // Secondary banner only when needed (not every frame chrome)
+                            if snap.movie_in_background {
+                                ui.add_space(6.0);
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new("本轮影片 · 可单独操作")
-                                            .size(11.0)
-                                            .color(FAINT),
+                                        RichText::new(format!(
+                                            "电影仍在后台 · {} 部 · 切回「电影」可关",
+                                            snap.movie_background_count
+                                        ))
+                                        .size(12.0)
+                                        .color(MUTED),
                                     );
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if snap.media_mode == MediaMode::Movie
-                                            && mini_text_btn(ui, "重新平铺").clicked()
-                                        {
-                                            self.session.retile_now();
-                                            self.show_toast("正在重新平铺…");
+                                        if mini_text_btn(ui, "关掉电影").clicked() {
+                                            self.session.stop_background_movie();
+                                            self.show_toast("已关闭后台电影");
                                         }
                                     });
                                 });
-                                ui.add_space(3.0);
-                                egui::ScrollArea::vertical()
-                                    .max_height(140.0)
-                                    .auto_shrink([false, true])
-                                    .show(ui, |ui| {
-                                        let mut close_idx: Option<usize> = None;
-                                        let mut focus_idx: Option<usize> = None;
-                                        let mut solo_idx: Option<usize> = None;
-                                        for it in &snap.items {
+                            }
+                        });
+
+                    ui.add(egui::Separator::default().spacing(0.0));
+
+                    // ── Workbench body: collapsible ops rail · main preview stage ──
+                    let body_h = ui.available_height().max(360.0);
+                    let t_side = ease_out_cubic(self.sidebar_vis.clamp(0.0, 1.0));
+                    let left_w = SIDEBAR_W * t_side;
+                    let show_rail = left_w >= 8.0;
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), body_h),
+                        Layout::left_to_right(Align::Min),
+                        |ui| {
+                            let total_w = ui.available_width();
+                            let gap = if show_rail { 0.0 } else { 0.0 };
+                            let right_w = (total_w - left_w - gap).max(200.0);
+
+                            // ── LEFT ops rail (narrow fixed width; can hide) ──
+                            if show_rail {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(left_w, body_h),
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    // Soft rail background so it reads as a dock, not empty space
+                                    let rail_rect = ui.max_rect();
+                                    ui.painter().rect_filled(
+                                        rail_rect,
+                                        0.0,
+                                        Color32::from_rgb(0xF3, 0xEF, 0xE8),
+                                    );
+                                    ui.painter().line_segment(
+                                        [
+                                            egui::pos2(rail_rect.right() - 0.5, rail_rect.top()),
+                                            egui::pos2(rail_rect.right() - 0.5, rail_rect.bottom()),
+                                        ],
+                                        Stroke::new(1.0, LINE),
+                                    );
+
+                                    egui::Frame::NONE
+                                        .inner_margin(egui::Margin {
+                                            left: 14,
+                                            right: 12,
+                                            top: 10,
+                                            bottom: 10,
+                                        })
+                                        .show(ui, |ui| {
+                                            ui.set_width((left_w - 26.0).max(40.0));
+                                            ui.set_clip_rect(ui.max_rect());
+                                            ui.spacing_mut().item_spacing.y = 6.0;
+
+                                            // Avoid recent (count lives in the top toolbar)
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new("避开最近播放")
+                                                        .size(13.0)
+                                                        .color(MUTED),
+                                                );
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        let mut avoid = cfg.avoid_recent;
+                                                        if toggle(ui, &mut avoid) {
+                                                            self.session.set_avoid_recent(avoid);
+                                                        }
+                                                    },
+                                                );
+                                            });
+
+                                            if !snap.last_errors.is_empty() {
+                                                ui.colored_label(
+                                                    Color32::from_rgb(0xB4, 0x53, 0x09),
+                                                    RichText::new(format!(
+                                                        "注意：{} 项启动异常",
+                                                        snap.last_errors.len()
+                                                    ))
+                                                    .size(12.0),
+                                                );
+                                            }
+
+                                            ui.add_space(4.0);
+
+                                            // Actions up front — left column is the control rail
+                                            let busy = matches!(
+                                                snap.phase,
+                                                SessionPhase::Starting | SessionPhase::Stopping
+                                            );
+                                            let playing = snap.phase == SessionPhase::Playing;
+                                            let has_preview = snap.has_preview;
+                                            let can_lib = !snap.library_roots.is_empty()
+                                                && snap.library_count > 0;
+                                            let is_img = snap.media_mode == MediaMode::Image;
+                                            let (primary, primary_ok) = if playing {
+                                                (
+                                                    if is_img { "关闭幻灯" } else { "关闭本轮" },
+                                                    !busy,
+                                                )
+                                            } else if has_preview {
+                                                (
+                                                    if is_img {
+                                                        "开启幻灯"
+                                                    } else {
+                                                        "开启播放"
+                                                    },
+                                                    !busy && can_lib,
+                                                )
+                                            } else {
+                                                ("随机预览", !busy && can_lib)
+                                            };
+
+                                            if primary_btn(ui, primary, primary_ok).clicked() {
+                                                if playing {
+                                                    self.session.stop();
+                                                    self.clear_slides();
+                                                } else if has_preview {
+                                                    self.session.start();
+                                                    if is_img {
+                                                        self.slide_index = 0;
+                                                        self.slide_elapsed = 0.0;
+                                                        self.slide_paused = false;
+                                                        self.clear_slides();
+                                                        let style = self
+                                                            .session
+                                                            .config_clone()
+                                                            .image_play_style;
+                                                        self.show_toast(match style {
+                                                            ImagePlayStyle::Slideshow => {
+                                                                "幻灯开始 · Esc 结束"
+                                                            }
+                                                            ImagePlayStyle::Wall => {
+                                                                "平铺墙 · 点击放大 · Esc 结束"
+                                                            }
+                                                        });
+                                                    } else {
+                                                        self.show_toast("正在按预览片单开播…");
+                                                    }
+                                                } else {
+                                                    self.session.roll_preview();
+                                                    self.show_toast(if is_img {
+                                                        "已生成图集预览，确认后点「开启幻灯」"
+                                                    } else {
+                                                        "已生成预览，确认后点「开启播放」"
+                                                    });
+                                                }
+                                            }
+
+                                            ui.add_space(6.0);
+                                            let reroll_ok = !busy
+                                                && can_lib
+                                                && (playing
+                                                    || snap.phase == SessionPhase::Idle);
+                                            if secondary_btn(
+                                                ui,
+                                                ui.available_width(),
+                                                "再来一批",
+                                                reroll_ok,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.session.reroll();
+                                                if playing {
+                                                    self.show_toast(
+                                                        "已停播并再来一批（未自动播放）",
+                                                    );
+                                                } else {
+                                                    self.show_toast("已再来一批");
+                                                }
+                                            }
+
+                                            ui.add_space(10.0);
+
+                                            // List fills all remaining left height
+                                            let list_h = ui.available_height().max(120.0);
+
+                                            if snap.phase == SessionPhase::Idle && snap.has_preview
+                                            {
+                                                ui.label(
+                                                    RichText::new("预览片单 · 悬停看全名")
+                                                        .size(11.0)
+                                                        .color(FAINT),
+                                                );
+                                                ui.add_space(3.0);
+                                                let scroll_h = (list_h - 22.0).max(80.0);
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(scroll_h)
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        let mut remove_idx: Option<usize> = None;
+                                                        let mut ban_idx: Option<usize> = None;
+                                                        for (i, path) in
+                                                            snap.current_files.iter().enumerate()
+                                                        {
+                                                            let title = path
+                                                                .file_name()
+                                                                .map(|n| {
+                                                                    file_title(
+                                                                        &n.to_string_lossy(),
+                                                                    )
+                                                                })
+                                                                .unwrap_or_else(|| {
+                                                                    file_title(
+                                                                        &path.display().to_string(),
+                                                                    )
+                                                                });
+                                                            // right-to-left: 拉黑 (stronger) on right
+                                                            sidebar_list_row(
+                                                                ui,
+                                                                i + 1,
+                                                                &title,
+                                                                96.0,
+                                                                |ui| {
+                                                                    if row_action_btn(ui, "拉黑")
+                                                                        .clicked()
+                                                                    {
+                                                                        ban_idx = Some(i);
+                                                                    }
+                                                                    if row_action_btn(ui, "剔除")
+                                                                        .clicked()
+                                                                    {
+                                                                        remove_idx = Some(i);
+                                                                    }
+                                                                },
+                                                            );
+                                                            ui.add_space(3.0);
+                                                        }
+                                                        if let Some(i) = ban_idx {
+                                                            if let Some(p) = self
+                                                                .session
+                                                                .blacklist_preview_item(i)
+                                                            {
+                                                                let short = truncate_path(
+                                                                    &p.file_name()
+                                                                        .map(|n| {
+                                                                            n.to_string_lossy()
+                                                                                .to_string()
+                                                                        })
+                                                                        .unwrap_or_default(),
+                                                                    20,
+                                                                );
+                                                                self.show_toast(format!(
+                                                                    "已拉黑：{short}"
+                                                                ));
+                                                            }
+                                                        } else if let Some(i) = remove_idx {
+                                                            self.session.remove_preview_item(i);
+                                                            self.show_toast("已从预览中剔除");
+                                                        }
+                                                    });
+                                            } else if snap.phase == SessionPhase::Playing
+                                                && !snap.items.is_empty()
+                                            {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new("本轮影片 · 可单独操作")
+                                                            .size(11.0)
+                                                            .color(FAINT),
+                                                    );
+                                                    ui.with_layout(
+                                                        Layout::right_to_left(Align::Center),
+                                                        |ui| {
+                                                            if snap.media_mode == MediaMode::Movie
+                                                                && mini_text_btn(ui, "重新平铺")
+                                                                    .clicked()
+                                                            {
+                                                                self.session.retile_now();
+                                                                self.show_toast("正在重新平铺…");
+                                                            }
+                                                        },
+                                                    );
+                                                });
+                                                ui.add_space(3.0);
+                                                let scroll_h = (list_h - 22.0).max(80.0);
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(scroll_h)
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        let mut close_idx: Option<usize> = None;
+                                                        let mut focus_idx: Option<usize> = None;
+                                                        let mut solo_idx: Option<usize> = None;
+                                                        for it in &snap.items {
+                                                            let title = file_title(&it.name);
+                                                            // right-to-left: 关闭 | 独播 | 置前
+                                                            sidebar_list_row(
+                                                                ui,
+                                                                it.index + 1,
+                                                                &title,
+                                                                128.0,
+                                                                |ui| {
+                                                                    if row_action_btn(ui, "关闭")
+                                                                        .clicked()
+                                                                    {
+                                                                        close_idx = Some(it.index);
+                                                                    }
+                                                                    if row_action_btn(ui, "独播")
+                                                                        .clicked()
+                                                                    {
+                                                                        solo_idx = Some(it.index);
+                                                                    }
+                                                                    if row_action_btn(ui, "置前")
+                                                                        .clicked()
+                                                                    {
+                                                                        focus_idx = Some(it.index);
+                                                                    }
+                                                                },
+                                                            );
+                                                            ui.add_space(3.0);
+                                                        }
+                                                        if let Some(i) = focus_idx {
+                                                            self.session.focus_item(i);
+                                                            self.show_window(ctx);
+                                                        }
+                                                        if let Some(i) = solo_idx {
+                                                            self.session.solo_item(i);
+                                                            self.show_window(ctx);
+                                                        }
+                                                        if let Some(i) = close_idx {
+                                                            self.session.close_item(i);
+                                                        }
+                                                    });
+                                            } else {
+                                                // Full-height empty card — left rail stays solid, not hollow
+                                                let count = self.session.ui_count();
+                                                let unit = if is_img { "张" } else { "部" };
+                                                let roots_n = snap.library_roots.len();
+                                                egui::Frame::NONE
+                                                    .fill(BG_SOFT)
+                                                    .stroke(Stroke::new(1.0, LINE))
+                                                    .inner_margin(egui::Margin::symmetric(14, 16))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_height(list_h - 4.0);
+                                                        ui.set_width(ui.available_width());
+                                                        ui.spacing_mut().item_spacing.y = 8.0;
+
+                                                        ui.label(
+                                                            RichText::new("本轮片单")
+                                                                .size(13.0)
+                                                                .color(INK)
+                                                                .strong(),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(if roots_n == 0 {
+                                                                "尚未添加片库目录".to_string()
+                                                            } else if snap.indexing {
+                                                                format!(
+                                                                    "索引中… 片库 {} 个目录",
+                                                                    roots_n
+                                                                )
+                                                            } else {
+                                                                format!(
+                                                                    "片库 {} {unit} · 将抽 {} {unit}",
+                                                                    snap.library_count, count
+                                                                )
+                                                            })
+                                                            .size(12.0)
+                                                            .color(MUTED),
+                                                        );
+
+                                                        ui.add_space(6.0);
+                                                        ui.separator();
+                                                        ui.add_space(6.0);
+
+                                                        let steps: &[&str] = if roots_n == 0 {
+                                                            &[
+                                                                "1. 右上角齿轮 → 添加片库",
+                                                                "2. 调整本轮数量",
+                                                                "3. 点「随机预览」生成片单",
+                                                            ]
+                                                        } else {
+                                                            &[
+                                                                "1. 点上方「随机预览」",
+                                                                "2. 主区查看封面网格",
+                                                                "3. 确认后点「开启播放」",
+                                                            ]
+                                                        };
+                                                        for line in steps {
+                                                            ui.label(
+                                                                RichText::new(*line)
+                                                                    .size(12.5)
+                                                                    .color(MUTED),
+                                                            );
+                                                        }
+
+                                                        if !can_lib && roots_n > 0 && !snap.indexing
+                                                        {
+                                                            ui.add_space(8.0);
+                                                            ui.label(
+                                                                RichText::new(
+                                                                    "当前片库为空，换个目录或重新扫描",
+                                                                )
+                                                                .size(12.0)
+                                                                .color(Color32::from_rgb(
+                                                                    0xB4, 0x53, 0x09,
+                                                                )),
+                                                            );
+                                                        }
+                                                    });
+                                            }
+                                        });
+                                },
+                            );
+                            } // end show_rail
+
+                            // ── MAIN STAGE: preview grid (takes remaining width) ──
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(right_w, body_h),
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    egui::Frame::NONE
+                                        .inner_margin(egui::Margin {
+                                            left: if show_rail { 12 } else { 16 },
+                                            right: 16,
+                                            top: 10,
+                                            bottom: 12,
+                                        })
+                                        .show(ui, |ui| {
+                                            let stage_w = (right_w
+                                                - if show_rail { 28.0 } else { 32.0 })
+                                            .max(160.0);
+                                            ui.set_width(stage_w);
+                                            let files = &snap.current_files;
+                                            let n = if files.is_empty() {
+                                                self.session.ui_count()
+                                            } else {
+                                                files.len()
+                                            };
+                                            let (rows, cols) = crate::tiler::rows_cols(n.max(1));
+                                            ui.horizontal(|ui| {
+                                                let preview_hint =
+                                                    if snap.phase == SessionPhase::Playing {
+                                                        format!("正在播放 · {rows}×{cols}")
+                                                    } else if snap.has_preview {
+                                                        format!(
+                                                            "本轮预览 · {rows}×{cols} · 未开播"
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "本轮预览 · 空 · 打开操作栏生成片单"
+                                                        )
+                                                    };
+                                                ui.label(
+                                                    RichText::new(preview_hint)
+                                                        .size(11.0)
+                                                        .color(FAINT)
+                                                        .extra_letter_spacing(0.3),
+                                                );
+                                                if !self.sidebar_open {
+                                                    ui.with_layout(
+                                                        Layout::right_to_left(Align::Center),
+                                                        |ui| {
+                                                            if mini_text_btn(ui, "操作栏")
+                                                                .clicked()
+                                                            {
+                                                                self.sidebar_open = true;
+                                                            }
+                                                        },
+                                                    );
+                                                }
+                                            });
+                                            ui.add_space(6.0);
+
+                                            // Remaining height is the slate — grid fills it edge-to-edge.
+                                            let slate_h = ui.available_height().max(120.0);
+                                            let slate_w = ui.available_width().max(80.0);
+                                            let gap_c = 6.0;
+                                            let margin = 8.0;
+
                                             egui::Frame::NONE
                                                 .fill(BG_SOFT)
                                                 .stroke(Stroke::new(1.0, LINE))
-                                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                                .inner_margin(margin)
                                                 .show(ui, |ui| {
-                                                    ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            RichText::new(format!(
-                                                                "{}. {}",
-                                                                it.index + 1,
-                                                                truncate_path(&it.name, 22)
-                                                            ))
-                                                            .size(12.0)
-                                                            .color(INK),
-                                                        );
-                                                        ui.with_layout(
-                                                            Layout::right_to_left(Align::Center),
-                                                            |ui| {
-                                                                if mini_text_btn(ui, "关闭")
-                                                                    .clicked()
-                                                                {
-                                                                    close_idx = Some(it.index);
+                                                    // Exact content area inside frame margins
+                                                    let avail_w = (slate_w - margin * 2.0).max(48.0);
+                                                    let avail_h = (slate_h - margin * 2.0).max(48.0);
+                                                    ui.set_min_size(Vec2::new(avail_w, avail_h));
+
+                                                    // Evenly tile — same idea as PotPlayer grid_layout.
+                                                    // No fixed aspect on cells: empty chrome around the grid
+                                                    // looked sparse; letterbox only inside each cell.
+                                                    let cell_w = ((avail_w
+                                                        - gap_c * (cols.saturating_sub(1) as f32))
+                                                        / cols as f32)
+                                                        .max(32.0);
+                                                    let cell_h = ((avail_h
+                                                        - gap_c * (rows.saturating_sub(1) as f32))
+                                                        / rows as f32)
+                                                        .max(32.0);
+
+                                                    for r in 0..rows {
+                                                        ui.horizontal(|ui| {
+                                                            ui.spacing_mut().item_spacing.x = gap_c;
+                                                            for c in 0..cols {
+                                                                let idx = r * cols + c;
+                                                                if idx >= n {
+                                                                    // Empty slot still holds space so grid stays full
+                                                                    let (rect, _) = ui
+                                                                        .allocate_exact_size(
+                                                                            Vec2::new(
+                                                                                cell_w, cell_h,
+                                                                            ),
+                                                                            Sense::hover(),
+                                                                        );
+                                                                    ui.painter().rect_filled(
+                                                                        rect,
+                                                                        0.0,
+                                                                        Color32::from_rgb(
+                                                                            0xE7, 0xE5, 0xE4,
+                                                                        ),
+                                                                    );
+                                                                    ui.painter().rect_stroke(
+                                                                        rect,
+                                                                        0.0,
+                                                                        Stroke::new(1.0, LINE),
+                                                                        egui::StrokeKind::Inside,
+                                                                    );
+                                                                    continue;
                                                                 }
-                                                                ui.add_space(4.0);
-                                                                if mini_text_btn(ui, "独播")
-                                                                    .clicked()
-                                                                {
-                                                                    solo_idx = Some(it.index);
-                                                                }
-                                                                ui.add_space(4.0);
-                                                                if mini_text_btn(ui, "置前")
-                                                                    .clicked()
-                                                                {
-                                                                    focus_idx = Some(it.index);
-                                                                }
-                                                            },
-                                                        );
-                                                    });
+                                                                let path_opt = files.get(idx);
+                                                                let label = path_opt
+                                                                    .and_then(|p| {
+                                                                        p.file_name().map(|n| {
+                                                                            n.to_string_lossy()
+                                                                                .to_string()
+                                                                        })
+                                                                    })
+                                                                    .unwrap_or_default();
+                                                                let tex = path_opt.and_then(|p| {
+                                                                    self.textures.get(
+                                                                        &p.to_string_lossy()
+                                                                            .to_string(),
+                                                                    )
+                                                                });
+                                                                preview_cell(
+                                                                    ui, cell_w, cell_h, &label,
+                                                                    tex,
+                                                                );
+                                                            }
+                                                        });
+                                                        if r + 1 < rows {
+                                                            ui.add_space(gap_c);
+                                                        }
+                                                    }
                                                 });
-                                            ui.add_space(3.0);
-                                        }
-                                        if let Some(i) = focus_idx {
-                                            self.session.focus_item(i);
-                                            self.show_window(ctx);
-                                        }
-                                        if let Some(i) = solo_idx {
-                                            self.session.solo_item(i);
-                                            self.show_window(ctx);
-                                        }
-                                        if let Some(i) = close_idx {
-                                            self.session.close_item(i);
-                                            self.fit_height_frames = 4;
-                                        }
-                                    });
-                            });
-                    }
-
-                    ui.add_space(6.0);
-
-                    // ── Actions: 预览 → 确认播放 ──
-                    egui::Frame::NONE
-                        .inner_margin(egui::Margin {
-                            left: 18,
-                            right: 18,
-                            top: 0,
-                            bottom: 10,
-                        })
-                        .show(ui, |ui| {
-                            let busy = matches!(
-                                snap.phase,
-                                SessionPhase::Starting | SessionPhase::Stopping
-                            );
-                            let playing = snap.phase == SessionPhase::Playing;
-                            let has_preview = snap.has_preview;
-                            let can_lib =
-                                !snap.library_roots.is_empty() && snap.library_count > 0;
-
-                            // Primary
-                            let is_img = snap.media_mode == MediaMode::Image;
-                            let (primary, primary_ok) = if playing {
-                                (
-                                    if is_img {
-                                        "关闭幻灯"
-                                    } else {
-                                        "关闭本轮"
-                                    },
-                                    !busy,
-                                )
-                            } else if has_preview {
-                                (
-                                    if is_img {
-                                        "开启幻灯"
-                                    } else {
-                                        "开启播放"
-                                    },
-                                    !busy && can_lib,
-                                )
-                            } else {
-                                ("随机预览", !busy && can_lib)
-                            };
-
-                            if primary_btn(ui, primary, primary_ok).clicked() {
-                                if playing {
-                                    self.session.stop();
-                                    self.clear_slides();
-                                } else if has_preview {
-                                    self.session.start();
-                                    if is_img {
-                                        self.slide_index = 0;
-                                        self.slide_elapsed = 0.0;
-                                        self.slide_paused = false;
-                                        self.clear_slides();
-                                        let style = self.session.config_clone().image_play_style;
-                                        self.show_toast(match style {
-                                            ImagePlayStyle::Slideshow => "幻灯开始 · Esc 结束",
-                                            ImagePlayStyle::Wall => "平铺墙 · 点击放大 · Esc 结束",
                                         });
-                                    } else {
-                                        self.show_toast("正在按预览片单开播…");
-                                    }
-                                } else {
-                                    self.session.roll_preview();
-                                    self.fit_height_frames = 6;
-                                    self.show_toast(if is_img {
-                                        "已生成图集预览，确认后点「开启幻灯」"
-                                    } else {
-                                        "已生成预览，确认后点「开启播放」"
-                                    });
-                                }
-                            }
-
-                            ui.add_space(6.0);
-                            // Secondary matches 随机预览: 4 chars
-                            let reroll_ok = !busy
-                                && can_lib
-                                && (playing || snap.phase == SessionPhase::Idle);
-                            if secondary_btn(ui, ui.available_width(), "再来一批", reroll_ok)
-                                .clicked()
-                            {
-                                self.session.reroll();
-                                self.fit_height_frames = 6;
-                                if playing {
-                                    self.show_toast("已停播并再来一批（未自动播放）");
-                                } else {
-                                    self.show_toast("已再来一批");
-                                }
-                            }
-                        });
+                                },
+                            );
+                        },
+                    );
                 });
 
-                // Resize window to the actual stacked content height (kills bottom dead space)
+                // Landscape is fixed-size by default; rare fit only (settings close etc.).
+                // After resize, re-center so the window does not stick to a corner.
                 if self.fit_height_frames > 0 && !self.show_settings {
                     let used_h = stack.response.rect.height().ceil() + 4.0;
                     let w = ctx.input(|i| {
                         i.viewport()
                             .inner_rect
                             .map(|r| r.width())
-                            .unwrap_or(440.0)
+                            .unwrap_or(1024.0)
                     });
-                    // Fit height to content (larger preview already fills more space).
-                    // Floor keeps room for settings modal without huge empty strip.
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                        w.clamp(500.0, 680.0),
-                        used_h.clamp(640.0, 1200.0),
+                        w.clamp(720.0, 1440.0),
+                        used_h.clamp(480.0, 960.0),
                     )));
                     self.fit_height_frames = self.fit_height_frames.saturating_sub(1);
+                    if self.fit_height_frames == 0 {
+                        self.need_center = true;
+                    }
                     ctx.request_repaint();
                 }
             });

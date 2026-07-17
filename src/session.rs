@@ -755,6 +755,12 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
+    pub fn set_tile_monitor_index(&self, index: i32) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.tile_monitor_index = index;
+        let _ = crate::config::save(&g.config);
+    }
+
     pub fn set_minimize_to_tray(&self, v: bool) {
         let mut g = self.inner.lock().unwrap();
         g.config.minimize_to_tray = v;
@@ -1070,7 +1076,8 @@ impl SessionHandle {
                 .map(|i| i.pid)
                 .filter(|p| *p != 0)
                 .collect();
-            let Ok(area) = tiler::work_area() else {
+            let mon = g.config.tile_monitor_index;
+            let Ok(area) = tiler::resolve_work_area(mon) else {
                 return;
             };
             let rects = tiler::grid_layout(pids.len(), area);
@@ -1299,7 +1306,8 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
     }
 
-    let Ok(area) = tiler::work_area() else {
+    let mon = handle.lock().unwrap().config.tile_monitor_index;
+    let Ok(area) = tiler::resolve_work_area(mon) else {
         let mut g = handle.lock().unwrap();
         g.phase = SessionPhase::Idle;
         g.message = "无法读取屏幕工作区".into();

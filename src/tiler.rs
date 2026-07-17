@@ -1,4 +1,8 @@
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, IsIconic, IsZoomed, SetWindowPos, ShowWindow, SystemParametersInfoW, HWND_TOP,
     SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
@@ -23,6 +27,30 @@ impl Rect {
     }
 }
 
+/// One physical display with its work area (taskbar excluded).
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub index: usize,
+    pub is_primary: bool,
+    pub work: Rect,
+    pub monitor: Rect,
+}
+
+impl MonitorInfo {
+    /// Short label for settings UI.
+    pub fn label(&self) -> String {
+        let tag = if self.is_primary { "主屏" } else { "副屏" };
+        format!(
+            "{} · {}×{} · #{}",
+            tag,
+            self.monitor.width().max(0),
+            self.monitor.height().max(0),
+            self.index + 1
+        )
+    }
+}
+
+/// Primary work area via SPI (legacy / default when index < 0).
 pub fn work_area() -> Result<Rect, String> {
     unsafe {
         let mut r = RECT::default();
@@ -40,6 +68,79 @@ pub fn work_area() -> Result<Rect, String> {
             bottom: r.bottom,
         })
     }
+}
+
+/// Enumerate displays in system order (stable for a session).
+pub fn list_monitors() -> Vec<MonitorInfo> {
+    struct Ctx {
+        list: Vec<MonitorInfo>,
+    }
+
+    unsafe extern "system" fn callback(
+        hmon: HMONITOR,
+        _hdc: HDC,
+        _prc: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Ctx);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let idx = ctx.list.len();
+            // MONITORINFOF_PRIMARY == 1
+            let primary = (mi.dwFlags & 1) != 0;
+            ctx.list.push(MonitorInfo {
+                index: idx,
+                is_primary: primary,
+                work: Rect {
+                    left: mi.rcWork.left,
+                    top: mi.rcWork.top,
+                    right: mi.rcWork.right,
+                    bottom: mi.rcWork.bottom,
+                },
+                monitor: Rect {
+                    left: mi.rcMonitor.left,
+                    top: mi.rcMonitor.top,
+                    right: mi.rcMonitor.right,
+                    bottom: mi.rcMonitor.bottom,
+                },
+            });
+        }
+        BOOL(1)
+    }
+
+    let mut ctx = Ctx { list: Vec::new() };
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(callback),
+            LPARAM(&mut ctx as *mut Ctx as isize),
+        );
+    }
+    ctx.list
+}
+
+/// Resolve tiling work area from config index.
+/// `-1` → system primary work area (SPI).  
+/// `>=0` → that monitor's `rcWork`; missing index falls back to primary then SPI.
+pub fn resolve_work_area(monitor_index: i32) -> Result<Rect, String> {
+    if monitor_index < 0 {
+        return work_area();
+    }
+    let list = list_monitors();
+    if list.is_empty() {
+        return work_area();
+    }
+    if let Some(m) = list.get(monitor_index as usize) {
+        return Ok(m.work);
+    }
+    if let Some(m) = list.iter().find(|m| m.is_primary) {
+        return Ok(m.work);
+    }
+    Ok(list[0].work)
 }
 
 /// Choose rows/cols for n tiles (spec heuristics).
@@ -253,5 +354,23 @@ mod tests {
     #[test]
     fn grid_ten_is_two_by_five() {
         assert_eq!(rows_cols(10), (2, 5));
+    }
+
+    #[test]
+    fn resolve_negative_matches_spi_work_area() {
+        let a = work_area().expect("SPI work area");
+        let b = resolve_work_area(-1).expect("resolve -1");
+        assert_eq!(a, b);
+        assert!(a.width() > 0 && a.height() > 0);
+    }
+
+    #[test]
+    fn list_monitors_nonempty_on_windows() {
+        let list = list_monitors();
+        assert!(!list.is_empty(), "expect at least one display");
+        let r = resolve_work_area(0).expect("index 0");
+        assert!(r.width() > 0 && r.height() > 0);
+        // OOB falls back without panic
+        let _ = resolve_work_area(99).expect("oob fallback");
     }
 }

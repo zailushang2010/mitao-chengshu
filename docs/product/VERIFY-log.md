@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-07-17 · 0.6.1 工作台壳层 + 置顶 + 多屏 + 图标
+
+### DEFINE/PLAN
+
+- `docs/product/changes/2026-07-17-workbench-shell-DEFINE-PLAN.md`
+- `docs/product/changes/2026-07-17-multi-monitor-DEFINE-PLAN.md`
+
+### 命令
+
+- [x] `cargo test` — **25 passed / 1 ignored**（含 `list_monitors` / `resolve_work_area`）
+- [ ] `cargo build --release` — 编译通过但链接时 **exe 被占用**（拒绝访问）；请关闭运行中的「蜜桃成熟」后执行 `cargo build --release`
+
+### 手测清单
+
+**工作台 / 置顶**
+
+- [ ] 启动横版、窗口居中
+- [ ] 侧栏图标隐藏/显示；隐藏后预览几乎全宽
+- [ ] 顶栏调节本轮数量；侧栏无重复数量
+- [ ] 随机预览片单单行；悬停仅一个无后缀名
+- [ ] 电影 Playing + 置顶：面板在 PotPlayer 之上；关置顶可被盖住；最小化正常
+
+**多屏（有副屏时）**
+
+- [ ] 设置 → 平铺工作区选副屏 → 开启播放 → 窗落在副屏
+- [ ] 改回「系统主工作区」→ 落主屏
+- [ ] 拔掉所选屏后开播不崩溃（回退）
+
+**图标**
+
+- [ ] exe / 任务栏 / 托盘为新图标
+
+### REVIEW
+
+- PLAN P2-wb、P2-2 → done  
+- DEFINE 已写工作台壳层、平铺选屏  
+- 遗留：P2-3 手测模板；侧栏开合不持久化；显示器 index 热插拔可能漂移  
+
+---
+
 ## 2026-07-17 · 0.6.0 发版 + P2-1 黑名单
 
 ### 命令

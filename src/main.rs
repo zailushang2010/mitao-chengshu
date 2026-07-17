@@ -111,10 +111,11 @@ fn main() -> eframe::Result<()> {
         ));
     }
 
+    // Workbench: collapsible ops rail · main preview stage
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([540.0, 780.0])
-        .with_min_inner_size([500.0, 620.0])
-        .with_max_inner_size([680.0, 1200.0])
+        .with_inner_size([1024.0, 640.0])
+        .with_min_inner_size([720.0, 480.0])
+        .with_max_inner_size([1440.0, 960.0])
         .with_resizable(true)
         .with_visible(true)
         .with_active(true)

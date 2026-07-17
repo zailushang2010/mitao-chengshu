@@ -100,6 +100,14 @@ pub struct Config {
     /// If true, title-bar close (X) hides to tray instead of quitting.
     #[serde(default)]
     pub minimize_to_tray: bool,
+    /// Which display to tile PotPlayer windows onto.
+    /// `-1` = system primary work area (SPI); `0..` = `tiler::list_monitors()` index.
+    #[serde(default = "default_tile_monitor_index")]
+    pub tile_monitor_index: i32,
+}
+
+fn default_tile_monitor_index() -> i32 {
+    -1
 }
 
 fn default_image_extensions() -> Vec<String> {
@@ -148,6 +156,7 @@ impl Default for Config {
             image_play_style: ImagePlayStyle::Slideshow,
             close_session_on_exit: false,
             minimize_to_tray: false,
+            tile_monitor_index: default_tile_monitor_index(),
         }
     }
 }

@@ -19,7 +19,8 @@
 | P1-3 | done | 拆分 `app/mod.rs` → widgets / media_view / settings | test+release 通过；行为等价 |
 | P1-4 | done | 索引可取消 + 根目录磁盘缓存 | 二次启动走缓存；取消索引；重新扫描强制 |
 | P2-1 | done | 黑名单/不再抽到 | 拉黑持久排除；设置可移出；0.6.0 |
-| P2-2 | todo | 多显示器选择工作区 | 平铺落在指定屏 |
+| P2-wb | done | 工作台壳层 + 置顶修复 + 新图标 | 见 changes/2026-07-17-workbench-shell；0.6.1 |
+| P2-2 | done | 多显示器选择工作区 | 设置下拉；resolve_work_area；0.6.1 |
 | P2-3 | todo | VERIFY 手测清单自动化记录模板 | 每次发版有 log |
 
 ---
