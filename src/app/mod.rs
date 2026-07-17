@@ -760,11 +760,33 @@ impl eframe::App for SuijiApp {
                                     "图片",
                                     snap.media_mode == MediaMode::Image,
                                     || {
+                                        // Plan A: PotPlayers keep running in background.
                                         self.session.set_media_mode(MediaMode::Image);
                                         self.clear_slides();
+                                        // Don't pin control panel over image UX.
+                                        crate::tray::set_main_window_topmost(false);
                                     },
                                 );
                             });
+                            if snap.movie_in_background {
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "电影仍在后台播放 · {} 部 · 切回「电影」可关闭本轮",
+                                            snap.movie_background_count
+                                        ))
+                                        .size(12.0)
+                                        .color(MUTED),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if mini_text_btn(ui, "关掉电影").clicked() {
+                                            self.session.stop_background_movie();
+                                            self.show_toast("已关闭后台电影");
+                                        }
+                                    });
+                                });
+                            }
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {

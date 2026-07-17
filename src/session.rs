@@ -44,6 +44,9 @@ pub struct SessionSnapshot {
     pub image_play_style: ImagePlayStyle,
     /// Background library scan in progress for the active mode.
     pub indexing: bool,
+    /// Movie PotPlayers still running while user is in 图片 mode (plan A).
+    pub movie_in_background: bool,
+    pub movie_background_count: usize,
 }
 
 impl Default for SessionSnapshot {
@@ -62,8 +65,15 @@ impl Default for SessionSnapshot {
             slideshow_interval_secs: 5,
             image_play_style: ImagePlayStyle::Slideshow,
             indexing: false,
+            movie_in_background: false,
+            movie_background_count: 0,
         }
     }
+}
+
+/// Movie players parked when switching to 图片 without killing PotPlayer.
+struct ParkedMovie {
+    items: Vec<LaunchedItem>,
 }
 
 struct Inner {
@@ -80,9 +90,13 @@ struct Inner {
     movie_history: History,
     image_history: History,
     phase: SessionPhase,
-    /// Selected for play (not launched yet)
+    /// Active mode's preview slate (synced from per-mode stores on switch).
     preview_files: Vec<PathBuf>,
+    movie_preview: Vec<PathBuf>,
+    image_preview: Vec<PathBuf>,
     items: Vec<LaunchedItem>,
+    /// Live PotPlayers kept when leaving 电影 for 图片.
+    parked_movie: Option<ParkedMovie>,
     message: String,
     last_errors: Vec<String>,
     ui_count: usize,
@@ -205,7 +219,10 @@ impl SessionHandle {
             image_history,
             phase: SessionPhase::Idle,
             preview_files: Vec::new(),
+            movie_preview: Vec::new(),
+            image_preview: Vec::new(),
             items: Vec::new(),
+            parked_movie: None,
             message: "就绪 · 先「随机预览」再「开启播放」".into(),
             last_errors: Vec::new(),
             ui_count,
@@ -280,6 +297,12 @@ impl SessionHandle {
             slideshow_interval_secs: g.config.slideshow_interval_secs,
             image_play_style: g.config.image_play_style,
             indexing: g.is_scan_busy(mode),
+            movie_in_background: g.parked_movie.is_some(),
+            movie_background_count: g
+                .parked_movie
+                .as_ref()
+                .map(|p| p.items.len())
+                .unwrap_or(0),
         }
     }
 
@@ -288,52 +311,85 @@ impl SessionHandle {
     }
 
     pub fn set_media_mode(&self, mode: MediaMode) {
-        let (pids, need_scan, cfg_to_save) = {
+        let (pids_to_kill, need_scan, cfg_to_save) = {
             let mut g = self.inner.lock().unwrap();
-            if g.config.media_mode == mode {
+            let old = g.config.media_mode;
+            if old == mode {
                 return;
             }
-            let pids: Vec<u32> = if g.phase == SessionPhase::Playing
-                || g.phase == SessionPhase::Starting
-            {
-                let p: Vec<u32> = g
-                    .items
-                    .iter()
-                    .map(|i| i.pid)
-                    .filter(|p| *p != 0)
-                    .collect();
+
+            // Persist active preview into per-mode store
+            match old {
+                MediaMode::Movie => g.movie_preview = g.preview_files.clone(),
+                MediaMode::Image => g.image_preview = g.preview_files.clone(),
+            }
+
+            let mut pids_to_kill: Vec<u32> = Vec::new();
+
+            // Leave movie: park running PotPlayers (plan A); kill only mid-start/stop.
+            if old == MediaMode::Movie {
+                match g.phase {
+                    SessionPhase::Playing if !g.items.is_empty() => {
+                        let items = std::mem::take(&mut g.items);
+                        g.parked_movie = Some(ParkedMovie { items });
+                        g.phase = SessionPhase::Idle;
+                    }
+                    SessionPhase::Starting | SessionPhase::Stopping => {
+                        pids_to_kill = g
+                            .items
+                            .iter()
+                            .map(|i| i.pid)
+                            .filter(|p| *p != 0)
+                            .collect();
+                        g.items.clear();
+                        g.phase = SessionPhase::Idle;
+                    }
+                    _ => {
+                        g.items.clear();
+                        g.phase = SessionPhase::Idle;
+                    }
+                }
+            } else {
+                // Leave image: in-app only — drop play state, keep preview store.
                 g.items.clear();
                 g.phase = SessionPhase::Idle;
-                p
-            } else {
-                Vec::new()
-            };
+            }
+
             g.config.media_mode = mode;
-            // Each mode remembers its own pick count.
             g.ui_count = g.config.default_count_for(mode);
-            g.preview_files.clear();
-            g.items.clear();
-            g.phase = SessionPhase::Idle;
-            // Persist media_mode without blocking the click path (save is async below).
+            g.preview_files = match mode {
+                MediaMode::Movie => g.movie_preview.clone(),
+                MediaMode::Image => g.image_preview.clone(),
+            };
+            g.last_errors.clear();
+
+            // Enter movie: restore parked players so user can 关闭本轮
+            if mode == MediaMode::Movie {
+                if let Some(parked) = g.parked_movie.take() {
+                    let n = parked.items.len();
+                    g.items = parked.items;
+                    g.phase = SessionPhase::Playing;
+                    g.message = format!("播放中 · {n} 部 · 已从图片切回，可「关闭本轮」");
+                } else {
+                    g.phase = SessionPhase::Idle;
+                    g.message = mode_switch_message(&g);
+                }
+            } else {
+                // Enter image; movie may be parked in background
+                g.phase = SessionPhase::Idle;
+                g.message = mode_switch_message(&g);
+            }
+
             let cfg_to_save = g.config.clone();
             let need_scan = !g.is_indexed(mode) && !g.is_scan_busy(mode);
-            // Prefer cached library immediately — never wait on disk in this call.
-            if g.is_scan_busy(mode) {
-                g.message = "索引中…".into();
-            } else if g.is_indexed(mode) {
-                g.message = idle_message(&g);
-            } else {
-                g.message = "索引中…".into();
-            }
-            (pids, need_scan, cfg_to_save)
+            (pids_to_kill, need_scan, cfg_to_save)
         };
-        // Disk I/O off the UI thread
         thread::spawn(move || {
             let _ = crate::config::save(&cfg_to_save);
         });
-        if !pids.is_empty() {
+        if !pids_to_kill.is_empty() {
             thread::spawn(move || {
-                potplayer::kill_pids(&pids);
+                potplayer::kill_pids(&pids_to_kill);
             });
         }
         if need_scan {
@@ -605,14 +661,13 @@ impl SessionHandle {
         if chosen.is_empty() {
             g.message = "未能选出影片".into();
             g.preview_files.clear();
+            sync_preview_store(&mut g);
             return;
         }
         g.preview_files = chosen;
+        sync_preview_store(&mut g);
         g.last_errors.clear();
-        g.message = format!(
-            "预览就绪 · {} 部 · 确认后点「开启播放」",
-            g.preview_files.len()
-        );
+        g.message = preview_ready_message(&g);
     }
 
     /// Remove one title from the preview slate (before play).
@@ -622,24 +677,41 @@ impl SessionHandle {
             return;
         }
         g.preview_files.remove(index);
+        sync_preview_store(&mut g);
         if g.preview_files.is_empty() {
             g.message = idle_message(&g);
         } else {
-            g.message = format!(
-                "预览就绪 · {} 部 · 确认后点「开启播放」",
-                g.preview_files.len()
-            );
+            g.message = preview_ready_message(&g);
         }
     }
 
     /// Launch current preview: movies → PotPlayer; images → in-app slideshow.
     pub fn start(&self) {
-        let mut g = self.inner.lock().unwrap();
-        if g.phase != SessionPhase::Idle {
-            return;
+        let parked_pids = {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Idle {
+                return;
+            }
+            if g.preview_files.is_empty() {
+                g.message = "请先「随机预览」生成片单".into();
+                return;
+            }
+            // Safety: never stack a new movie round on parked pots.
+            if g.config.media_mode == MediaMode::Movie {
+                g.parked_movie
+                    .take()
+                    .map(|p| p.items.iter().map(|i| i.pid).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
+        if !parked_pids.is_empty() {
+            potplayer::kill_pids(&parked_pids);
         }
-        if g.preview_files.is_empty() {
-            g.message = "请先「随机预览」生成片单".into();
+
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle || g.preview_files.is_empty() {
             return;
         }
         if g.config.media_mode == MediaMode::Image {
@@ -649,7 +721,7 @@ impl SessionHandle {
             g.last_errors.clear();
             g.message = match g.config.image_play_style {
                 ImagePlayStyle::Slideshow => {
-                    format!("幻灯中 · {n} 张 · 空格暂停 · ←/→ 切换 · Esc 结束")
+                    format!("幻灯中 · {n} 张 · 空格暂停 · 左右切换 · Esc 结束")
                 }
                 ImagePlayStyle::Wall => {
                     format!("平铺墙 · {n} 张 · 点击放大 · Esc 结束")
@@ -685,6 +757,7 @@ impl SessionHandle {
                     g.preview_files.len()
                 );
             }
+            // Parked movie pots keep running until user returns to 电影.
             return;
         }
 
@@ -692,6 +765,12 @@ impl SessionHandle {
         g.message = "正在关闭本轮…".into();
         let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
         g.items.clear();
+        // Also clear any stray parked (should be empty in movie mode).
+        if let Some(parked) = g.parked_movie.take() {
+            // merge pids
+            // actually in movie mode parked is empty after restore
+            let _ = parked;
+        }
         drop(g);
 
         let handle = self.inner.clone();
@@ -708,6 +787,26 @@ impl SessionHandle {
                 );
             }
         });
+    }
+
+    /// Kill parked background movie players (e.g. from 图片 mode without switching back).
+    pub fn stop_background_movie(&self) {
+        let pids = {
+            let mut g = self.inner.lock().unwrap();
+            let Some(parked) = g.parked_movie.take() else {
+                return;
+            };
+            let pids: Vec<u32> = parked.items.iter().map(|i| i.pid).collect();
+            if g.config.media_mode == MediaMode::Image {
+                g.message = idle_message(&g);
+            }
+            pids
+        };
+        if !pids.is_empty() {
+            thread::spawn(move || {
+                potplayer::kill_pids(&pids);
+            });
+        }
     }
 
     /// Re-roll preview only. If playing, stop players first then new preview (no auto-play).
@@ -746,12 +845,40 @@ impl SessionHandle {
 
     pub fn shutdown_if_needed(&self) {
         let g = self.inner.lock().unwrap();
-        if g.config.close_session_on_exit && !g.items.is_empty() {
-            let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
-            drop(g);
+        if !g.config.close_session_on_exit {
+            return;
+        }
+        let mut pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
+        if let Some(ref parked) = g.parked_movie {
+            pids.extend(parked.items.iter().map(|i| i.pid));
+        }
+        drop(g);
+        if !pids.is_empty() {
             potplayer::kill_pids(&pids);
         }
     }
+}
+
+fn sync_preview_store(g: &mut Inner) {
+    match g.config.media_mode {
+        MediaMode::Movie => g.movie_preview = g.preview_files.clone(),
+        MediaMode::Image => g.image_preview = g.preview_files.clone(),
+    }
+}
+
+fn preview_ready_message(g: &Inner) -> String {
+    let n = g.preview_files.len();
+    let unit = match g.config.media_mode {
+        MediaMode::Movie => "部",
+        MediaMode::Image => "张",
+    };
+    let mut msg = format!("预览就绪 · {n} {unit} · 确认后点「开启播放」");
+    if let Some(ref p) = g.parked_movie {
+        if g.config.media_mode == MediaMode::Image {
+            msg.push_str(&format!(" · 电影后台 {} 部", p.items.len()));
+        }
+    }
+    msg
 }
 
 fn save_history(mode: MediaMode, history: &History) {
@@ -769,25 +896,39 @@ fn idle_message(g: &Inner) -> String {
     if g.is_scan_busy(g.config.media_mode) {
         return "索引中…".into();
     }
+    let bg = g
+        .parked_movie
+        .as_ref()
+        .filter(|_| g.config.media_mode == MediaMode::Image)
+        .map(|p| format!(" · 电影后台 {} 部", p.items.len()))
+        .unwrap_or_default();
+
     if g.library().is_empty() {
         if g.config.roots_for(g.config.media_mode).is_empty() {
-            format!("请先设置{}库目录", g.config.media_mode.label())
+            format!(
+                "请先设置{}库目录{bg}",
+                g.config.media_mode.label()
+            )
         } else {
-            format!("{}库中未找到文件", g.config.media_mode.label())
+            format!("{}库中未找到文件{bg}", g.config.media_mode.label())
         }
     } else if g.preview_files.is_empty() {
         format!(
-            "就绪 · 已索引 {} {} · 先「随机预览」",
+            "就绪 · 已索引 {} {} · 先「随机预览」{bg}",
             g.library().len(),
             unit
         )
     } else {
         format!(
-            "预览就绪 · {} {} · 可「开启播放」",
+            "预览就绪 · {} {} · 可「开启播放」{bg}",
             g.preview_files.len(),
             unit
         )
     }
+}
+
+fn mode_switch_message(g: &Inner) -> String {
+    idle_message(g)
 }
 
 fn run_start(handle: Arc<Mutex<Inner>>) {
@@ -846,6 +987,7 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         save_history(mode, &hist);
         // Keep preview in sync with what actually launched
         g.preview_files = paths.clone();
+        sync_preview_store(&mut g);
         g.items = launched;
         g.phase = SessionPhase::Playing;
         g.last_errors = errors;
