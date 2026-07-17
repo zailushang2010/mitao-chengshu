@@ -6,3 +6,8 @@ Cargo.lock
 Thumbs.db
 config.json
 history.json
+
+run_err.txt
+run_out.txt
+startup.log
+thumbs/
