@@ -47,10 +47,17 @@ pub struct LaunchedItem {
 pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, Vec<String>) {
     let mut ok = Vec::new();
     let mut errors = Vec::new();
+    let last = files.len().saturating_sub(1);
 
     for (i, file) in files.iter().enumerate() {
         if i > 0 {
-            thread::sleep(Duration::from_millis(LAUNCH_STAGGER_MS));
+            // Last instance needs a bit more gap — often steals focus / restores old geometry
+            let gap = if i == last {
+                LAUNCH_STAGGER_MS + 160
+            } else {
+                LAUNCH_STAGGER_MS
+            };
+            thread::sleep(Duration::from_millis(gap));
         }
         match launch_one(potplayer, file) {
             Ok(pid) => ok.push(LaunchedItem {
@@ -59,6 +66,10 @@ pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, V
             }),
             Err(e) => errors.push(format!("{}: {e}", file.display())),
         }
+    }
+    // Extra settle after the last process spawn so its HWND can appear before tile
+    if !ok.is_empty() {
+        thread::sleep(Duration::from_millis(420 + ok.len() as u64 * 40));
     }
 
     (ok, errors)
@@ -204,6 +215,27 @@ pub fn hwnds_aligned_to_pids(pids: &[u32], attempts: u32, delay_ms: u64) -> Vec<
     let found = find_hwnds_for_pids(pids, attempts, delay_ms);
     let map: HashMap<u32, isize> = found.into_iter().collect();
     pids.iter().map(|p| map.get(p).copied().unwrap_or(0)).collect()
+}
+
+/// Poll until every PID has a window, or `timeout_ms` elapses.
+/// Favors waiting for the last PID (usually the one that "jumps out").
+pub fn wait_hwnds_aligned(pids: &[u32], timeout_ms: u64) -> Vec<isize> {
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = hwnds_aligned_to_pids(pids, 3, 80);
+    while std::time::Instant::now() < deadline {
+        if last.iter().all(|&h| h != 0) {
+            // All present — short extra settle for last window chrome
+            thread::sleep(Duration::from_millis(180));
+            return hwnds_aligned_to_pids(pids, 2, 50);
+        }
+        thread::sleep(Duration::from_millis(100));
+        last = hwnds_aligned_to_pids(pids, 2, 60);
+    }
+    // Final longer hunt for any still missing (esp. last)
+    hwnds_aligned_to_pids(pids, 12, 100)
 }
 
 fn window_class_name(hwnd: windows::Win32::Foundation::HWND) -> String {

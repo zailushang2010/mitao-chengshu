@@ -96,31 +96,44 @@ pub fn grid_layout(n: usize, area: Rect) -> Vec<Rect> {
 }
 
 pub fn tile_hwnds(hwnds: &[isize], rects: &[Rect]) {
+    // Front-to-back first
     for (hwnd, rect) in hwnds.iter().zip(rects.iter()) {
         if *hwnd == 0 {
             continue;
         }
         let _ = move_window(*hwnd, *rect);
     }
+    // Last slot again — last-launched instance most often jumps out after open
+    if let (Some(&h), Some(r)) = (hwnds.last(), rects.last()) {
+        if h != 0 {
+            let _ = move_window(h, *r);
+        }
+    }
 }
 
-/// Place windows; run twice with a short gap for stubborn players.
+/// Place windows; multiple passes for stubborn / late PotPlayer instances.
 pub fn tile_hwnds_stable(hwnds: &[isize], rects: &[Rect]) {
     tile_hwnds(hwnds, rects);
-    std::thread::sleep(std::time::Duration::from_millis(280));
+    std::thread::sleep(std::time::Duration::from_millis(220));
     tile_hwnds(hwnds, rects);
+    std::thread::sleep(std::time::Duration::from_millis(180));
+    // Hammer the last window twice more (common offender)
+    if let (Some(&h), Some(r)) = (hwnds.last(), rects.last()) {
+        if h != 0 {
+            let _ = move_window(h, *r);
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            let _ = move_window(h, *r);
+        }
+    }
 }
 
 fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
     unsafe {
         let h = HWND(hwnd as *mut _);
-        // Restore from maximized / minimized so SetWindowPos applies reliably
-        if IsZoomed(h).as_bool() || IsIconic(h).as_bool() {
-            let _ = ShowWindow(h, SW_RESTORE);
-        } else {
-            let _ = ShowWindow(h, SW_SHOWNORMAL);
-        }
-        // First pass: size/pos without activate (avoid focus thrash)
+        // Always restore — last instance often opens maximized / remembered fullscreen
+        let _ = ShowWindow(h, SW_RESTORE);
+        let _ = ShowWindow(h, SW_SHOWNORMAL);
+        let flags = SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED;
         SetWindowPos(
             h,
             Some(HWND_TOP),
@@ -128,10 +141,10 @@ fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
             rect.top,
             rect.width(),
             rect.height(),
-            SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            flags,
         )
         .map_err(|e| e.to_string())?;
-        // Second pass: PotPlayer often re-applies last geometry after first move
+        // Immediate second apply — PotPlayer rewrites geometry on first message
         SetWindowPos(
             h,
             Some(HWND_TOP),
@@ -139,7 +152,7 @@ fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
             rect.top,
             rect.width(),
             rect.height(),
-            SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            flags,
         )
         .map_err(|e| e.to_string())?;
     }

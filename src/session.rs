@@ -1034,19 +1034,17 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
     }
 
     let pids: Vec<u32> = launched.iter().map(|i| i.pid).collect();
-    // Let windows register before first tile pass
+    // Wait until windows exist (last instance is slowest / most likely to jump out)
+    let settle_ms = 900 + pids.len() as u64 * 120;
+    tile_session_wait(&pids, settle_ms);
+    // Immediate second full pass after a beat — last window often re-maximizes once
     thread::sleep(std::time::Duration::from_millis(350));
-    let tiled = tile_session(&pids);
-    if tiled < pids.len() {
-        // One immediate retry for late HWND registration
-        thread::sleep(std::time::Duration::from_millis(400));
-        tile_session(&pids);
-    }
+    tile_session(&pids);
 
-    // Late re-tiles: PotPlayer often repositions itself after first paint / decode
+    // Late re-tiles denser early, then long tail for last decoder-open jump
     let pids_retile = pids.clone();
     thread::spawn(move || {
-        for wait_ms in [700_u64, 1200, 2000, 3200] {
+        for wait_ms in [500_u64, 800, 1200, 1800, 2800, 4200] {
             thread::sleep(std::time::Duration::from_millis(wait_ms));
             tile_session(&pids_retile);
         }
@@ -1095,8 +1093,19 @@ fn tile_session(pids: &[u32]) -> usize {
     if pids.is_empty() {
         return 0;
     }
-    // More attempts + longer wait: slow disks / first-open decoder delay
-    let hwnds = potplayer::hwnds_aligned_to_pids(pids, 20, 120);
+    let hwnds = potplayer::hwnds_aligned_to_pids(pids, 16, 100);
+    apply_tile(pids, &hwnds)
+}
+
+fn tile_session_wait(pids: &[u32], timeout_ms: u64) -> usize {
+    if pids.is_empty() {
+        return 0;
+    }
+    let hwnds = potplayer::wait_hwnds_aligned(pids, timeout_ms);
+    apply_tile(pids, &hwnds)
+}
+
+fn apply_tile(pids: &[u32], hwnds: &[isize]) -> usize {
     let found = hwnds.iter().filter(|&&h| h != 0).count();
     if found == 0 {
         return 0;
@@ -1104,11 +1113,11 @@ fn tile_session(pids: &[u32]) -> usize {
     let Ok(area) = tiler::work_area() else {
         return 0;
     };
-    // Always use full launch count so late windows land in the right cell later
+    // Full launch count grid — last index always maps to last cell
     let rects = tiler::grid_layout(pids.len(), area);
     if rects.len() != hwnds.len() {
         return 0;
     }
-    tiler::tile_hwnds_stable(&hwnds, &rects);
+    tiler::tile_hwnds_stable(hwnds, &rects);
     found
 }
