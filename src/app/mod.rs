@@ -596,19 +596,26 @@ impl eframe::App for SuijiApp {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
 
                 // Success / info toast under title bar
+                // Note: do not use "✓" as text — CJK primary font often lacks it and
+                // renders a green tofu box on the left (see mode-switch toasts).
                 if let Some((ref msg, left)) = self.toast {
                     let alpha = (left / 0.35).clamp(0.0, 1.0).min(1.0);
                     let a = (220.0 * alpha) as u8;
+                    let icon_a = (255.0 * alpha) as u8;
                     egui::Frame::NONE
                         .fill(Color32::from_rgba_unmultiplied(28, 25, 23, a))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("✓")
-                                        .size(15.0)
-                                        .color(Color32::from_rgb(0x86, 0xEF, 0xAC)),
+                                ui.add_space(2.0);
+                                let (icon_rect, _) =
+                                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+                                ui.painter().circle_filled(
+                                    icon_rect.center(),
+                                    4.5,
+                                    Color32::from_rgba_unmultiplied(0x86, 0xEF, 0xAC, icon_a),
                                 );
+                                ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(msg.as_str())
                                         .size(14.0)
