@@ -19,8 +19,8 @@ const CANDIDATES: &[&str] = &[
     r"C:\Program Files (x86)\DAUM\PotPlayer\PotPlayerMini.exe",
 ];
 
-/// Stagger between multi-instance launches so each window can register.
-const LAUNCH_STAGGER_MS: u64 = 220;
+/// Base stagger between multi-instance launches (grows with index for large batches).
+const LAUNCH_STAGGER_MS: u64 = 200;
 
 pub fn resolve_potplayer_path(configured: &str) -> Option<PathBuf> {
     if !configured.trim().is_empty() {
@@ -51,12 +51,14 @@ pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, V
 
     for (i, file) in files.iter().enumerate() {
         if i > 0 {
-            // Last instance needs a bit more gap — often steals focus / restores old geometry
-            let gap = if i == last {
-                LAUNCH_STAGGER_MS + 160
-            } else {
-                LAUNCH_STAGGER_MS
-            };
+            // Spread launches: later instances (esp. last) need more time to register
+            // without fighting earlier ones for focus / remembered geometry.
+            let mut gap = LAUNCH_STAGGER_MS + i as u64 * 55;
+            if i == last {
+                gap += 220;
+            }
+            // Cap so 16-open doesn't take forever (~4s max between two)
+            gap = gap.min(900);
             thread::sleep(Duration::from_millis(gap));
         }
         match launch_one(potplayer, file) {
@@ -67,9 +69,9 @@ pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, V
             Err(e) => errors.push(format!("{}: {e}", file.display())),
         }
     }
-    // Extra settle after the last process spawn so its HWND can appear before tile
+    // Extra settle after last spawn (scales with batch size)
     if !ok.is_empty() {
-        thread::sleep(Duration::from_millis(420 + ok.len() as u64 * 40));
+        thread::sleep(Duration::from_millis(500 + ok.len() as u64 * 70));
     }
 
     (ok, errors)

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::config::{Config, ImagePlayStyle, MediaMode};
 use crate::history::History;
@@ -106,6 +107,8 @@ struct Inner {
     ui_count: usize,
     /// Live counter while a background scan runs for any mode.
     scan_found: Arc<AtomicUsize>,
+    /// Keep re-tiling until this instant (late windows / self-moving PotPlayer).
+    retile_until: Option<Instant>,
 }
 
 impl Inner {
@@ -233,6 +236,7 @@ impl SessionHandle {
             last_errors: Vec::new(),
             ui_count,
             scan_found: Arc::new(AtomicUsize::new(0)),
+            retile_until: None,
         };
         // Initial index for active mode only (keeps other mode for first switch).
         let roots = inner.config.roots_for(mode);
@@ -827,12 +831,11 @@ impl SessionHandle {
 
         g.phase = SessionPhase::Stopping;
         g.message = "正在关闭本轮…".into();
+        g.retile_until = None;
         let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
         g.items.clear();
         // Also clear any stray parked (should be empty in movie mode).
         if let Some(parked) = g.parked_movie.take() {
-            // merge pids
-            // actually in movie mode parked is empty after restore
             let _ = parked;
         }
         drop(g);
@@ -850,6 +853,30 @@ impl SessionHandle {
                     g.preview_files.len()
                 );
             }
+        });
+    }
+
+    /// Force re-tile current movie players and extend auto-settle a few more seconds.
+    pub fn retile_now(&self) {
+        let pids: Vec<u32> = {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Playing || g.config.media_mode != MediaMode::Movie {
+                return;
+            }
+            g.retile_until = Some(Instant::now() + Duration::from_secs(10));
+            g.items
+                .iter()
+                .map(|i| i.pid)
+                .filter(|p| *p != 0)
+                .collect()
+        };
+        if pids.is_empty() {
+            return;
+        }
+        thread::spawn(move || {
+            tile_session(&pids);
+            thread::sleep(Duration::from_millis(400));
+            tile_session(&pids);
         });
     }
 
@@ -1034,19 +1061,63 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
     }
 
     let pids: Vec<u32> = launched.iter().map(|i| i.pid).collect();
-    // Wait until windows exist (last instance is slowest / most likely to jump out)
-    let settle_ms = 900 + pids.len() as u64 * 120;
+    let n = pids.len();
+    // Wait until windows exist (scales with batch — many opens = more stragglers)
+    let settle_ms = 1200 + n as u64 * 180;
     tile_session_wait(&pids, settle_ms);
-    // Immediate second full pass after a beat — last window often re-maximizes once
-    thread::sleep(std::time::Duration::from_millis(350));
+    thread::sleep(Duration::from_millis(300));
     tile_session(&pids);
 
-    // Late re-tiles denser early, then long tail for last decoder-open jump
+    // Continuous re-tile window: late decoders + "remembered geometry" after open.
+    // e.g. 6 → ~17s, 10 → ~23s, cap 30s. Interval starts tight then eases out.
+    let retile_secs = (10.0 + n as f32 * 1.4).min(30.0);
+    {
+        let mut g = handle.lock().unwrap();
+        g.retile_until = Some(Instant::now() + Duration::from_secs_f32(retile_secs));
+    }
+    let handle_retile = handle.clone();
     let pids_retile = pids.clone();
     thread::spawn(move || {
-        for wait_ms in [500_u64, 800, 1200, 1800, 2800, 4200] {
-            thread::sleep(std::time::Duration::from_millis(wait_ms));
-            tile_session(&pids_retile);
+        let mut step_ms: u64 = 450;
+        loop {
+            thread::sleep(Duration::from_millis(step_ms));
+            let still = {
+                let g = handle_retile.lock().unwrap();
+                let active = g.phase == SessionPhase::Playing
+                    && g.config.media_mode == MediaMode::Movie
+                    && !g.items.is_empty();
+                let until_ok = g
+                    .retile_until
+                    .map(|t| Instant::now() < t)
+                    .unwrap_or(false);
+                if !active || !until_ok {
+                    false
+                } else {
+                    true
+                }
+            };
+            if !still {
+                let mut g = handle_retile.lock().unwrap();
+                g.retile_until = None;
+                break;
+            }
+            // Prefer live item list (reap may have removed dead PIDs)
+            let live_pids: Vec<u32> = {
+                let g = handle_retile.lock().unwrap();
+                g.items
+                    .iter()
+                    .map(|i| i.pid)
+                    .filter(|p| *p != 0)
+                    .collect()
+            };
+            let use_pids = if live_pids.is_empty() {
+                pids_retile.clone()
+            } else {
+                live_pids
+            };
+            tile_session_quick(&use_pids);
+            // Slow down gradually so we don't fight user after things settle
+            step_ms = (step_ms + 80).min(1000);
         }
     });
 
@@ -1074,9 +1145,9 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
 
     // After PotPlayers open, raise control panel and pin it (app clears pin on minimize).
     thread::spawn(|| {
-        thread::sleep(std::time::Duration::from_millis(450));
+        thread::sleep(Duration::from_millis(450));
         crate::tray::force_show_and_pin();
-        thread::sleep(std::time::Duration::from_millis(600));
+        thread::sleep(Duration::from_millis(600));
         crate::tray::force_show_and_pin();
     });
 }
@@ -1094,7 +1165,16 @@ fn tile_session(pids: &[u32]) -> usize {
         return 0;
     }
     let hwnds = potplayer::hwnds_aligned_to_pids(pids, 16, 100);
-    apply_tile(pids, &hwnds)
+    apply_tile(pids, &hwnds, true)
+}
+
+/// Faster path for the continuous retile loop (must not sleep too long).
+fn tile_session_quick(pids: &[u32]) -> usize {
+    if pids.is_empty() {
+        return 0;
+    }
+    let hwnds = potplayer::hwnds_aligned_to_pids(pids, 5, 40);
+    apply_tile(pids, &hwnds, false)
 }
 
 fn tile_session_wait(pids: &[u32], timeout_ms: u64) -> usize {
@@ -1102,10 +1182,10 @@ fn tile_session_wait(pids: &[u32], timeout_ms: u64) -> usize {
         return 0;
     }
     let hwnds = potplayer::wait_hwnds_aligned(pids, timeout_ms);
-    apply_tile(pids, &hwnds)
+    apply_tile(pids, &hwnds, true)
 }
 
-fn apply_tile(pids: &[u32], hwnds: &[isize]) -> usize {
+fn apply_tile(pids: &[u32], hwnds: &[isize], stable: bool) -> usize {
     let found = hwnds.iter().filter(|&&h| h != 0).count();
     if found == 0 {
         return 0;
@@ -1118,6 +1198,12 @@ fn apply_tile(pids: &[u32], hwnds: &[isize]) -> usize {
     if rects.len() != hwnds.len() {
         return 0;
     }
-    tiler::tile_hwnds_stable(hwnds, &rects);
+    if stable {
+        tiler::tile_hwnds_stable(hwnds, &rects);
+    } else {
+        tiler::tile_hwnds(hwnds, &rects);
+    }
     found
 }
+
+

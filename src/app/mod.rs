@@ -1128,11 +1128,21 @@ impl eframe::App for SuijiApp {
                                 bottom: 2,
                             })
                             .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new("本轮影片 · 可单独操作")
-                                        .size(11.0)
-                                        .color(FAINT),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("本轮影片 · 可单独操作")
+                                            .size(11.0)
+                                            .color(FAINT),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if snap.media_mode == MediaMode::Movie
+                                            && mini_text_btn(ui, "重新平铺").clicked()
+                                        {
+                                            self.session.retile_now();
+                                            self.show_toast("正在重新平铺…");
+                                        }
+                                    });
+                                });
                                 ui.add_space(3.0);
                                 egui::ScrollArea::vertical()
                                     .max_height(140.0)
