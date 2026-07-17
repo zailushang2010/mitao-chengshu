@@ -20,7 +20,7 @@ const CANDIDATES: &[&str] = &[
 ];
 
 /// Stagger between multi-instance launches so each window can register.
-const LAUNCH_STAGGER_MS: u64 = 180;
+const LAUNCH_STAGGER_MS: u64 = 220;
 
 pub fn resolve_potplayer_path(configured: &str) -> Option<PathBuf> {
     if !configured.trim().is_empty() {
@@ -170,33 +170,55 @@ fn raise_hwnd(hwnd: isize) {
     }
 }
 
-/// Find primary (largest visible top-level) window for each PID, with retries.
+/// Find primary top-level window for each PID (prefer PotPlayer class + largest area).
+/// Returns `(pid, hwnd)` in the same order as `pids`; missing PIDs are omitted.
 pub fn find_hwnds_for_pids(pids: &[u32], attempts: u32, delay_ms: u64) -> Vec<(u32, isize)> {
     let want: HashSet<u32> = pids.iter().copied().collect();
+    // score = class_bonus + area
     let mut best: HashMap<u32, (isize, i64)> = HashMap::new();
 
     for attempt in 0..attempts {
-        enum_top_level_windows(|hwnd, pid, area| {
-            if !want.contains(&pid) || area < 20_000 {
+        enum_top_level_windows(|hwnd, pid, score| {
+            if !want.contains(&pid) {
                 return;
             }
-            let entry = best.entry(pid).or_insert((hwnd, 0));
-            if area > entry.1 {
-                *entry = (hwnd, area);
+            let entry = best.entry(pid).or_insert((hwnd, i64::MIN));
+            if score > entry.1 {
+                *entry = (hwnd, score);
             }
         });
 
         if best.len() >= want.len() && attempt >= 2 {
-            // Found all; still give one more short settle after attempt 2
             break;
         }
         thread::sleep(Duration::from_millis(delay_ms));
     }
 
-    // Preserve input PID order
     pids.iter()
         .filter_map(|pid| best.get(pid).map(|(h, _)| (*pid, *h)))
         .collect()
+}
+
+/// Ordered hwnd list aligned to `pids` (0 = not found yet).
+pub fn hwnds_aligned_to_pids(pids: &[u32], attempts: u32, delay_ms: u64) -> Vec<isize> {
+    let found = find_hwnds_for_pids(pids, attempts, delay_ms);
+    let map: HashMap<u32, isize> = found.into_iter().collect();
+    pids.iter().map(|p| map.get(p).copied().unwrap_or(0)).collect()
+}
+
+fn window_class_name(hwnd: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
+    if n == 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n])
+}
+
+fn is_potplayer_class(class: &str) -> bool {
+    let c = class.to_ascii_lowercase();
+    c.contains("potplayer") || c.contains("potplayermini")
 }
 
 fn enum_top_level_windows(mut f: impl FnMut(isize, u32, i64)) {
@@ -218,10 +240,12 @@ fn enum_top_level_windows(mut f: impl FnMut(isize, u32, i64)) {
         if pid == 0 {
             return BOOL(1);
         }
-        if !IsWindowVisible(hwnd).as_bool() {
+        // Accept invisible briefly-creating windows only if iconic; else need visible
+        let visible = IsWindowVisible(hwnd).as_bool();
+        let iconic = IsIconic(hwnd).as_bool();
+        if !visible && !iconic {
             return BOOL(1);
         }
-        // Skip minimized-only enumeration for size; still include for restore later
         let owner = GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default());
         if !owner.0.is_null() {
             return BOOL(1);
@@ -234,11 +258,19 @@ fn enum_top_level_windows(mut f: impl FnMut(isize, u32, i64)) {
         let w = (rect.right - rect.left).max(0) as i64;
         let h = (rect.bottom - rect.top).max(0) as i64;
         let mut area = w * h;
-        // Minimized windows often report small shell rects — still accept with floor
-        if IsIconic(hwnd).as_bool() {
-            area = area.max(100_000);
+        if iconic {
+            area = area.max(80_000);
         }
-        (ctx.f)(hwnd.0 as isize, pid, area);
+        // Ignore tiny tool windows / splash (unless PotPlayer class)
+        let class = window_class_name(hwnd);
+        let pot = is_potplayer_class(&class);
+        if !pot && area < 8_000 {
+            return BOOL(1);
+        }
+        // Prefer real player frames over auxiliary windows of same process
+        let class_bonus = if pot { 50_000_000_i64 } else { 0 };
+        let score = class_bonus + area;
+        (ctx.f)(hwnd.0 as isize, pid, score);
         BOOL(1)
     }
 

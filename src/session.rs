@@ -1034,15 +1034,22 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
     }
 
     let pids: Vec<u32> = launched.iter().map(|i| i.pid).collect();
-    tile_session(&pids);
+    // Let windows register before first tile pass
+    thread::sleep(std::time::Duration::from_millis(350));
+    let tiled = tile_session(&pids);
+    if tiled < pids.len() {
+        // One immediate retry for late HWND registration
+        thread::sleep(std::time::Duration::from_millis(400));
+        tile_session(&pids);
+    }
 
-    // Late re-tile: some PotPlayer builds move themselves after first paint
+    // Late re-tiles: PotPlayer often repositions itself after first paint / decode
     let pids_retile = pids.clone();
     thread::spawn(move || {
-        thread::sleep(std::time::Duration::from_millis(900));
-        tile_session(&pids_retile);
-        thread::sleep(std::time::Duration::from_millis(700));
-        tile_session(&pids_retile);
+        for wait_ms in [700_u64, 1200, 2000, 3200] {
+            thread::sleep(std::time::Duration::from_millis(wait_ms));
+            tile_session(&pids_retile);
+        }
     });
 
     // Update history with successfully launched
@@ -1082,23 +1089,26 @@ fn file_stem(p: &std::path::Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-fn tile_session(pids: &[u32]) {
-    let hwnd_pairs = potplayer::find_hwnds_for_pids(pids, 15, 180);
-    if hwnd_pairs.is_empty() {
-        return;
+/// Tile all launched PIDs into a full-N grid (missing HWNDs keep their slot empty).
+/// Returns how many windows were actually moved.
+fn tile_session(pids: &[u32]) -> usize {
+    if pids.is_empty() {
+        return 0;
+    }
+    // More attempts + longer wait: slow disks / first-open decoder delay
+    let hwnds = potplayer::hwnds_aligned_to_pids(pids, 20, 120);
+    let found = hwnds.iter().filter(|&&h| h != 0).count();
+    if found == 0 {
+        return 0;
     }
     let Ok(area) = tiler::work_area() else {
-        return;
+        return 0;
     };
-    let mut hwnds_ordered = Vec::new();
-    for pid in pids {
-        if let Some((_, h)) = hwnd_pairs.iter().find(|(p, _)| p == pid) {
-            hwnds_ordered.push(*h);
-        }
+    // Always use full launch count so late windows land in the right cell later
+    let rects = tiler::grid_layout(pids.len(), area);
+    if rects.len() != hwnds.len() {
+        return 0;
     }
-    if hwnds_ordered.is_empty() {
-        hwnds_ordered = hwnd_pairs.iter().map(|(_, h)| *h).collect();
-    }
-    let rects = tiler::grid_layout(hwnds_ordered.len(), area);
-    tiler::tile_hwnds_stable(&hwnds_ordered, &rects);
+    tiler::tile_hwnds_stable(&hwnds, &rects);
+    found
 }

@@ -1,8 +1,8 @@
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     IsIconic, IsZoomed, SetWindowPos, ShowWindow, SystemParametersInfoW, HWND_TOP, SPI_GETWORKAREA,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_RESTORE, SYSTEM_PARAMETERS_INFO_ACTION,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,7 @@ pub fn tile_hwnds(hwnds: &[isize], rects: &[Rect]) {
 /// Place windows; run twice with a short gap for stubborn players.
 pub fn tile_hwnds_stable(hwnds: &[isize], rects: &[Rect]) {
     tile_hwnds(hwnds, rects);
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    std::thread::sleep(std::time::Duration::from_millis(280));
     tile_hwnds(hwnds, rects);
 }
 
@@ -117,7 +117,10 @@ fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
         // Restore from maximized / minimized so SetWindowPos applies reliably
         if IsZoomed(h).as_bool() || IsIconic(h).as_bool() {
             let _ = ShowWindow(h, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(h, SW_SHOWNORMAL);
         }
+        // First pass: size/pos without activate (avoid focus thrash)
         SetWindowPos(
             h,
             Some(HWND_TOP),
@@ -125,7 +128,18 @@ fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
             rect.top,
             rect.width(),
             rect.height(),
-            SWP_SHOWWINDOW | SWP_NOACTIVATE,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .map_err(|e| e.to_string())?;
+        // Second pass: PotPlayer often re-applies last geometry after first move
+        SetWindowPos(
+            h,
+            Some(HWND_TOP),
+            rect.left,
+            rect.top,
+            rect.width(),
+            rect.height(),
+            SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .map_err(|e| e.to_string())?;
     }
