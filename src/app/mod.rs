@@ -199,7 +199,7 @@ impl eframe::App for SuijiApp {
                                 );
                                 ui.add_space(2.0);
                                 ui.label(
-                                    RichText::new(crate::brand::APP_NAME)
+                                    RichText::new("今日片单")
                                         .size(24.0)
                                         .color(INK)
                                         .strong(),
