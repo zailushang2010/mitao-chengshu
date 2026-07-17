@@ -12,12 +12,13 @@ mod thumb;
 mod tiler;
 mod tray;
 
-use brand::{APP_NAME, MUTEX_NAME, WINDOW_TITLE};
+use brand::{APP_NAME, MUTEX_NAME, SHOW_EVENT_NAME, WINDOW_TITLE};
 use eframe::egui;
 use session::SessionHandle;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn main() -> eframe::Result<()> {
     init_log();
@@ -27,12 +28,19 @@ fn main() -> eframe::Result<()> {
     let _mutex = match acquire_mutex() {
         MutexAcquire::Ok(m) => m,
         MutexAcquire::AlreadyRunning => {
-            log_line("already running — focusing existing window");
-            focus_existing_window();
-            message_box(
-                APP_NAME,
-                "程序已在运行。\n\n若看不到窗口，请查看任务栏或托盘区（右下角小图标）。\n已尝试把已有窗口带到前台。",
-            );
+            log_line("already running — signal + focus existing");
+            let signaled = signal_show_event();
+            log_line(&format!("show event signaled={signaled}"));
+            // Give first instance a moment to poll the event
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let focused = tray::force_show_main_window_result();
+            log_line(&format!("focus existing hwnd_ok={focused}"));
+            if !focused {
+                message_box(
+                    APP_NAME,
+                    "程序已在运行。\n\n若看不到窗口，请查看任务栏或托盘区（右下角小图标）。\n已尝试把已有窗口带到前台。",
+                );
+            }
             return Ok(());
         }
         MutexAcquire::Error(e) => {
@@ -40,6 +48,10 @@ fn main() -> eframe::Result<()> {
             None
         }
     };
+
+    // Second-instance wake flag (named event waiter → AtomicBool)
+    let show_from_second = Arc::new(AtomicBool::new(false));
+    spawn_show_event_waiter(show_from_second.clone());
 
     // Clean stale lock files from older versions
     let _ = std::fs::remove_file(config::app_data_dir().join("suiji_potplayer.lock"));
@@ -116,12 +128,13 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let show_flag = show_from_second;
     let result = eframe::run_native(
         APP_NAME,
         native_options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             log_line("eframe created");
-            Ok(Box::new(app::SuijiApp::new(cc, session)))
+            Ok(Box::new(app::SuijiApp::new(cc, session, show_flag)))
         }),
     );
 
@@ -183,29 +196,61 @@ fn acquire_mutex() -> MutexAcquire {
     }
 }
 
-fn focus_existing_window() {
+/// Second instance → wake first instance via named auto-reset event.
+fn signal_show_event() -> bool {
     use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+
+    let wide: Vec<u16> = SHOW_EVENT_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let Ok(h) = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(wide.as_ptr())) else {
+            return false;
+        };
+        let ok = SetEvent(h).is_ok();
+        let _ = CloseHandle(h);
+        ok
+    }
+}
+
+/// First instance: wait on named event forever; set AtomicBool for UI to raise window.
+fn spawn_show_event_waiter(flag: Arc<AtomicBool>) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        CreateEventW, WaitForSingleObject, INFINITE,
     };
 
-    let title: Vec<u16> = WINDOW_TITLE.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) else {
-            log_line("FindWindow: no window with title");
+    std::thread::spawn(move || {
+        let wide: Vec<u16> = SHOW_EVENT_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            // Auto-reset event; create if missing
+            CreateEventW(None, false, false, PCWSTR(wide.as_ptr()))
+        };
+        let Ok(handle) = handle else {
+            log_line("show event: CreateEvent failed");
             return;
         };
-        if hwnd.0.is_null() {
-            log_line("FindWindow: null hwnd");
-            return;
+        log_line("show event: waiter started");
+        loop {
+            let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
+            if wait == WAIT_OBJECT_0 {
+                flag.store(true, Ordering::SeqCst);
+                log_line("show event: signaled by second instance");
+            } else {
+                break;
+            }
         }
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+        unsafe {
+            let _ = CloseHandle(handle);
         }
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-        log_line("focused existing window");
-    }
+    });
 }
 
 fn message_box(title: &str, body: &str) {

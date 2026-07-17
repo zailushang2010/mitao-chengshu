@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-07-17 · P1-2 单实例加固
+
+### DEFINE/PLAN
+
+- `docs/product/changes/2026-07-17-single-instance-DEFINE-PLAN.md`
+- 跳过图片墙（用户：图片不需要）
+
+### 命令
+
+- [x] `cargo test` — 19 passed / 1 ignored
+- [x] `cargo build --release` — Finished
+
+### 手测
+
+- [ ] 运行中再双击 exe → 无第二进程，原窗口前置
+- [ ] 最小化到托盘后再双击 → 窗口恢复
+- [ ] 成功前置时无弹「已在运行」对话框（找不到窗才提示）
+
+### REVIEW
+
+- Mutex + 命名 Event + `force_show_main_window_result`（AttachThreadInput 级前置）
+- PLAN P1-2 → done；P1-1 → cancelled
+
+---
+
 ## 2026-07-17 · 流程固化 + 基线
 
 ### 命令

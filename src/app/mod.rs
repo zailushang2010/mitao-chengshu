@@ -3,6 +3,8 @@ mod theme;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, TextureHandle, Vec2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::config::{ImagePlayStyle, MediaMode};
 use crate::session::{SessionHandle, SessionPhase};
@@ -47,6 +49,8 @@ pub struct SuijiApp {
     slide_fade: f32,
     /// Seconds since last PotPlayer liveness check.
     reap_accum: f32,
+    /// Second instance asked us to show (named event).
+    show_from_second: Arc<AtomicBool>,
 }
 
 /// Toast life: enter 160ms → hold → exit 180ms (ease-out feel via alpha).
@@ -64,7 +68,11 @@ const SETTINGS_OPEN_SECS: f32 = 0.20;
 const SETTINGS_CLOSE_SECS: f32 = 0.12;
 
 impl SuijiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, session: SessionHandle) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        session: SessionHandle,
+        show_from_second: Arc<AtomicBool>,
+    ) -> Self {
         theme::apply_magazine_style(&cc.egui_ctx);
         // Always show on create
         cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -121,6 +129,7 @@ impl SuijiApp {
             slide_prev: None,
             slide_fade: 1.0,
             reap_accum: 0.0,
+            show_from_second,
         }
     }
 
@@ -603,11 +612,23 @@ impl eframe::App for SuijiApp {
 
         self.poll_tray(ctx);
 
+        // Second instance double-clicked the exe → raise this window (incl. tray-hidden).
+        if self
+            .show_from_second
+            .swap(false, Ordering::SeqCst)
+        {
+            self.show_window(ctx);
+            self.show_toast("已切换到当前窗口");
+            ctx.request_repaint();
+        }
+
         // While we may be hidden, keep a light repaint heartbeat so tray
         // channel is drained even if winit is quiet.
         if self.tray.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(400));
         }
+        // Always poll second-instance wake reasonably often
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
         // Close → tray (unless force quit or setting off)
         if ctx.input(|i| i.viewport().close_requested()) {

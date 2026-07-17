@@ -11,6 +11,9 @@ pub const WINDOW_TITLE: &str = "蜜桃成熟";
 /// 单实例互斥量
 pub const MUTEX_NAME: &str = "Local\\MiTaoChengShu_SingleInstance_v1";
 
+/// 第二实例唤醒第一实例窗口的命名事件
+pub const SHOW_EVENT_NAME: &str = "Local\\MiTaoChengShu_ShowWindow_v1";
+
 /// Embedded application icon (source: src/icon.ico)
 pub const ICON_ICO: &[u8] = include_bytes!("icon.ico");
 

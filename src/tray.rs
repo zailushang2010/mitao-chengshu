@@ -163,11 +163,17 @@ impl TrayService {
 /// Show / restore control window above PotPlayer instances.
 /// Flash TOPMOST then clear — caller may re-pin with `set_main_window_topmost(true)`.
 pub fn force_show_main_window() {
+    let _ = force_show_main_window_result();
+}
+
+/// Returns whether a main window HWND was found and raise was attempted.
+pub fn force_show_main_window_result() -> bool {
     let Some(hwnd) = find_main_hwnd() else {
-        return;
+        return false;
     };
     raise_hwnd(hwnd, true);
     set_topmost(hwnd, false);
+    true
 }
 
 /// Raise and keep on top (for 播放中可操作). Pair with clear when minimized / idle.
