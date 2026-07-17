@@ -867,9 +867,11 @@ impl SuijiApp {
 
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("缩略图：同目录海报图，或系统 PATH 中的 ffmpeg")
-                        .size(11.0)
-                        .color(FAINT),
+                    RichText::new(
+                        "缩略图优先用片源旁已有图片（同名.jpg / poster / cover / 封面 等），否则用 ffmpeg 抽帧",
+                    )
+                    .size(11.0)
+                    .color(FAINT),
                 );
 
                 ui.add_space(16.0);
