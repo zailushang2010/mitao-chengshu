@@ -41,7 +41,7 @@
 4. 幻灯：空格暂停，←/→ 切换，Esc 结束  
    平铺墙：点击放大，再点返回，Esc 结束
 
-## 构建
+## 构建 / 打包
 
 ```bash
 cargo build --release
@@ -49,6 +49,17 @@ cargo build --release
 
 产物：`target/release/蜜桃成熟.exe`  
 图标：`src/icon.ico`
+
+一键打绿色包（测试 + release + zip）：
+
+```powershell
+pwsh -File scripts/pack.ps1
+```
+
+输出：
+
+- `dist/蜜桃成熟-v0.4.0-win64/` — 文件夹（exe + 使用说明）
+- `dist/蜜桃成熟-v0.4.0-win64.zip` — 可直接分发
 
 ## 配置（`config.json`，与 exe 同目录）
 
