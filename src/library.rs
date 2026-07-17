@@ -114,4 +114,30 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// Real library smoke test (this machine). Run with:
+    /// `cargo test scan_f_movies -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn scan_f_movies() {
+        let lib = Library::scan(
+            r"F:\电影",
+            &[
+                ".mkv".into(),
+                ".mp4".into(),
+                ".avi".into(),
+                ".ts".into(),
+                ".m2ts".into(),
+                ".wmv".into(),
+                ".mov".into(),
+                ".flv".into(),
+                ".webm".into(),
+            ],
+        );
+        eprintln!("F:\\电影 indexed = {}", lib.len());
+        assert!(
+            lib.len() > 0,
+            "expected at least one video under F:\\电影"
+        );
+    }
 }
