@@ -27,6 +27,7 @@ pub struct SuijiApp {
     /// Shrink window height to content for a few frames (kill bottom dead space)
     fit_height_frames: u8,
     last_fit_count: usize,
+    last_media_mode: MediaMode,
     last_phase: SessionPhase,
     /// User hid to tray; don't auto-raise until they ask
     user_hid_to_tray: bool,
@@ -83,6 +84,7 @@ impl SuijiApp {
             s.library_roots.is_empty() || s.library_count == 0
         };
         let last_fit_count = session.ui_count();
+        let last_media_mode = session.media_mode();
         let toast = if need_library {
             Some(ToastState {
                 msg: "请先添加片库目录（右上角齿轮 · 片库设置）".to_string(),
@@ -104,6 +106,7 @@ impl SuijiApp {
             boot_frames: 10,
             fit_height_frames: 12,
             last_fit_count,
+            last_media_mode,
             last_phase: SessionPhase::Idle,
             user_hid_to_tray: false,
             toast,
@@ -668,39 +671,40 @@ impl eframe::App for SuijiApp {
         self.ensure_thumbs(&snap.current_files, ctx);
         let cfg = self.session.config_clone();
 
-        // Count changes → preview rows change → re-fit window height
+        // Count / mode changes and window height:
+        // Mode switch often changes ui_count (movie vs image defaults) — must NOT
+        // thrash InnerSize for 6 frames, or the window looks like it "reloads".
         let count_now = self.session.ui_count();
-        if count_now != self.last_fit_count {
+        if snap.media_mode != self.last_media_mode {
+            self.last_media_mode = snap.media_mode;
             self.last_fit_count = count_now;
-            self.fit_height_frames = 6;
+            // One gentle remeasure after layout settles (pin row may appear/disappear).
+            self.fit_height_frames = 1;
+        } else if count_now != self.last_fit_count {
+            self.last_fit_count = count_now;
+            self.fit_height_frames = 3;
         }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(BG).inner_margin(0.0))
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
-
-                // Success / info toast — enter/hold/exit alpha (interruptible replace)
-                if let Some(ref toast) = self.toast {
-                    let alpha = Self::toast_alpha(toast);
-                    let a = (220.0 * alpha) as u8;
-                    let icon_a = (255.0 * alpha) as u8;
-                    let text_a = (255.0 * alpha) as u8;
-                    // Slight slide from top via top margin (spatial consistency)
-                    let top_pad = (10.0 * (1.0 - alpha)).round() as i8;
+        // Toast as overlay — does not push content or resize the window.
+        if let Some(ref toast) = self.toast {
+            let alpha = Self::toast_alpha(toast);
+            let a = (220.0 * alpha) as u8;
+            let icon_a = (255.0 * alpha) as u8;
+            let text_a = (255.0 * alpha) as u8;
+            let y = 8.0 + (1.0 - alpha) * 8.0;
+            egui::Area::new(egui::Id::new("toast_overlay"))
+                .fixed_pos(egui::pos2(12.0, y))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .show(ctx, |ui| {
                     egui::Frame::NONE
                         .fill(Color32::from_rgba_unmultiplied(28, 25, 23, a))
-                        .inner_margin(egui::Margin {
-                            left: 14,
-                            right: 14,
-                            top: 10 + top_pad.max(0) as i8,
-                            bottom: 10,
-                        })
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .corner_radius(2.0)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.add_space(2.0);
-                                let (icon_rect, _) =
-                                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+                                let (icon_rect, _) = ui
+                                    .allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
                                 ui.painter().circle_filled(
                                     icon_rect.center(),
                                     4.5,
@@ -719,7 +723,13 @@ impl eframe::App for SuijiApp {
                                 );
                             });
                         });
-                }
+                });
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(BG).inner_margin(0.0))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
 
                 // Pack everything in one vertical column — no ScrollArea (it was leaving a tall empty band).
                 let stack = ui.vertical(|ui| {
@@ -739,11 +749,9 @@ impl eframe::App for SuijiApp {
                                     "电影",
                                     snap.media_mode == MediaMode::Movie,
                                     || {
+                                        // Instant switch: no texture wipe, no window thrash, no toast reflow.
                                         self.session.set_media_mode(MediaMode::Movie);
                                         self.clear_slides();
-                                        self.textures.clear();
-                                        self.fit_height_frames = 6;
-                                        self.show_toast("已切换到电影模式");
                                     },
                                 );
                                 ui.add_space(6.0);
@@ -754,9 +762,6 @@ impl eframe::App for SuijiApp {
                                     || {
                                         self.session.set_media_mode(MediaMode::Image);
                                         self.clear_slides();
-                                        self.textures.clear();
-                                        self.fit_height_frames = 6;
-                                        self.show_toast("已切换到图片模式 · 预览后开启幻灯");
                                     },
                                 );
                             });

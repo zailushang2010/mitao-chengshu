@@ -221,8 +221,17 @@ impl SessionHandle {
         let handle = Self {
             inner: Arc::new(Mutex::new(inner)),
         };
+        // Scan active mode first; also warm the other mode so 电影↔图片 is instant.
         if !roots.is_empty() {
             handle.begin_scan(mode);
+        }
+        let other = match mode {
+            MediaMode::Movie => MediaMode::Image,
+            MediaMode::Image => MediaMode::Movie,
+        };
+        let other_roots = handle.inner.lock().unwrap().config.roots_for(other);
+        if !other_roots.is_empty() {
+            handle.begin_scan(other);
         }
         handle
     }
@@ -305,8 +314,10 @@ impl SessionHandle {
             g.preview_files.clear();
             g.items.clear();
             g.phase = SessionPhase::Idle;
+            // Persist media_mode without blocking the click path (save is async below).
             let cfg_to_save = g.config.clone();
             let need_scan = !g.is_indexed(mode) && !g.is_scan_busy(mode);
+            // Prefer cached library immediately — never wait on disk in this call.
             if g.is_scan_busy(mode) {
                 g.message = "索引中…".into();
             } else if g.is_indexed(mode) {
