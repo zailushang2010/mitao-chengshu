@@ -459,14 +459,12 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         g.message = msg;
     }
 
-    // PotPlayer steals focus — briefly raise control panel, then release topmost
-    // so the user can minimize/close normally.
+    // After PotPlayers open, raise control panel and pin it (app clears pin on minimize).
     thread::spawn(|| {
-        thread::sleep(std::time::Duration::from_millis(400));
-        crate::tray::force_show_main_window();
-        thread::sleep(std::time::Duration::from_millis(500));
-        crate::tray::force_show_main_window();
-        crate::tray::set_main_window_topmost(false);
+        thread::sleep(std::time::Duration::from_millis(450));
+        crate::tray::force_show_and_pin();
+        thread::sleep(std::time::Duration::from_millis(600));
+        crate::tray::force_show_and_pin();
     });
 }
 

@@ -28,6 +28,9 @@ pub struct SuijiApp {
     user_hid_to_tray: bool,
     /// Transient success / info banner: (text, seconds left)
     toast: Option<(String, f32)>,
+    /// While playing, keep panel above PotPlayer (user can toggle; cleared on minimize)
+    pin_while_playing: bool,
+    window_was_minimized: bool,
 }
 
 impl SuijiApp {
@@ -75,6 +78,8 @@ impl SuijiApp {
             last_phase: SessionPhase::Idle,
             user_hid_to_tray: false,
             toast,
+            pin_while_playing: true,
+            window_was_minimized: false,
         }
     }
 
@@ -82,10 +87,19 @@ impl SuijiApp {
         self.toast = Some((msg.into(), 2.4));
     }
 
+    fn playing_now(&self) -> bool {
+        self.session.snapshot().phase == SessionPhase::Playing
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
         self.user_hid_to_tray = false;
-        // Win32 first (cuts through PotPlayer wall), then sync eframe
-        crate::tray::force_show_main_window();
+        self.window_was_minimized = false;
+        // Cut through PotPlayer; re-pin if in play mode
+        if self.playing_now() && self.pin_while_playing {
+            crate::tray::force_show_and_pin();
+        } else {
+            crate::tray::force_show_main_window();
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -94,9 +108,43 @@ impl SuijiApp {
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.user_hid_to_tray = true;
+        self.window_was_minimized = false;
         crate::tray::set_main_window_topmost(false);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         ctx.request_repaint_after(std::time::Duration::from_millis(400));
+    }
+
+    /// Pin above players while Playing, but release on minimize so taskbar works.
+    fn sync_play_pin_state(&mut self, ctx: &egui::Context, phase: SessionPhase) {
+        let minimized = ctx.input(|i| i.viewport().minimized == Some(true));
+
+        if phase != SessionPhase::Playing || self.user_hid_to_tray || !self.pin_while_playing {
+            if self.last_phase == SessionPhase::Playing || !self.pin_while_playing {
+                crate::tray::set_main_window_topmost(false);
+            }
+            self.window_was_minimized = minimized;
+            return;
+        }
+
+        // Playing + pin enabled
+        if minimized {
+            if !self.window_was_minimized {
+                // User clicked minimize — must drop TOPMOST or it fights the system
+                crate::tray::set_main_window_topmost(false);
+            }
+            self.window_was_minimized = true;
+        } else {
+            if self.window_was_minimized {
+                // Restored from taskbar — raise above PotPlayers and pin again
+                crate::tray::force_show_and_pin();
+                self.window_was_minimized = false;
+            } else if self.last_phase == SessionPhase::Starting {
+                crate::tray::set_main_window_topmost(true);
+            } else {
+                // Stay above players without restoring (won't undo minimize)
+                crate::tray::set_main_window_topmost(true);
+            }
+        }
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
@@ -215,19 +263,7 @@ impl eframe::App for SuijiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        // After 开启本轮 finishes, briefly raise panel once — never sticky-topmost
-        // (sticky topmost blocked minimize and felt stuck).
-        if self.last_phase == SessionPhase::Starting && snap.phase == SessionPhase::Playing {
-            if !self.user_hid_to_tray {
-                self.show_window(ctx);
-                crate::tray::set_main_window_topmost(false);
-            }
-        }
-        if matches!(snap.phase, SessionPhase::Idle | SessionPhase::Stopping)
-            && self.last_phase == SessionPhase::Playing
-        {
-            crate::tray::set_main_window_topmost(false);
-        }
+        self.sync_play_pin_state(ctx, snap.phase);
         self.last_phase = snap.phase;
 
         self.ensure_thumbs(&snap.current_files, ctx);
@@ -303,6 +339,32 @@ impl eframe::App for SuijiApp {
                                         }
                                         ui.add_space(4.0);
                                     }
+                                    // Pin while playing — hover explains
+                                    let pin_tip = if self.pin_while_playing {
+                                        "播放时置顶：开（点此关闭，便于把窗口让给播放器）"
+                                    } else {
+                                        "播放时置顶：关（点此开启，便于在电影上操作控制台）"
+                                    };
+                                    if icon_btn_toggle(
+                                        ui,
+                                        IconKind::Pin,
+                                        pin_tip,
+                                        self.pin_while_playing,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.pin_while_playing = !self.pin_while_playing;
+                                        if !self.pin_while_playing {
+                                            crate::tray::set_main_window_topmost(false);
+                                            self.show_toast("已关闭播放时置顶");
+                                        } else {
+                                            if self.playing_now() && !self.user_hid_to_tray {
+                                                crate::tray::force_show_and_pin();
+                                            }
+                                            self.show_toast("已开启播放时置顶（最小化时会自动取消）");
+                                        }
+                                    }
+                                    ui.add_space(4.0);
                                     if icon_btn(ui, IconKind::Rescan, "重新扫描片库").clicked() {
                                         self.session.rescan();
                                     }
@@ -1122,30 +1184,40 @@ enum IconKind {
     Settings,
     Rescan,
     Tray,
+    Pin,
 }
 
-/// Magazine-style square icon button with hover + tooltip.
 fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
+    icon_btn_toggle(ui, kind, tip, false)
+}
+
+/// Magazine-style square icon button; `active` draws stronger (for pin on).
+fn icon_btn_toggle(ui: &mut egui::Ui, kind: IconKind, tip: &str, active: bool) -> egui::Response {
     let size = Vec2::new(40.0, 40.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let hovered = resp.hovered();
-    let stroke = if hovered {
+    let stroke = if active || hovered {
         Stroke::new(1.2, INK)
     } else {
         Stroke::new(1.0, LINE_STRONG)
     };
-    let fill = if hovered { BG_SOFT } else { BG };
+    let fill = if active {
+        Color32::from_rgb(0xE7, 0xE0, 0xD6)
+    } else if hovered {
+        BG_SOFT
+    } else {
+        BG
+    };
     ui.painter().rect_filled(rect, 2.0, fill);
     ui.painter()
         .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
 
     let c = rect.center();
-    let ink = if hovered { INK } else { MUTED };
+    let ink = if active || hovered { INK } else { MUTED };
     let s = Stroke::new(1.4, ink);
 
     match kind {
         IconKind::Settings => {
-            // Gear: circle + teeth ticks
             ui.painter().circle_stroke(c, 7.0, s);
             ui.painter().circle_filled(c, 2.2, ink);
             for i in 0..6 {
@@ -1156,9 +1228,7 @@ fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
             }
         }
         IconKind::Rescan => {
-            // Circular arrows (refresh)
             let r = 8.0;
-            // arc approximation with polyline
             let mut pts = Vec::new();
             for i in 0..=14 {
                 let t = i as f32 / 14.0;
@@ -1168,7 +1238,6 @@ fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
             for w in pts.windows(2) {
                 ui.painter().line_segment([w[0], w[1]], s);
             }
-            // arrow head at end
             if let Some(&p) = pts.last() {
                 let a = -0.2 + 0.72 * std::f32::consts::TAU;
                 let dir = Vec2::new(a.cos(), a.sin());
@@ -1178,11 +1247,10 @@ fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
             }
         }
         IconKind::Tray => {
-            // Window minimize into tray: rectangle + down chevron
-            let box_r = egui::Rect::from_center_size(c + Vec2::new(0.0, -2.0), Vec2::new(14.0, 10.0));
+            let box_r =
+                egui::Rect::from_center_size(c + Vec2::new(0.0, -2.0), Vec2::new(14.0, 10.0));
             ui.painter()
                 .rect_stroke(box_r, 1.0, s, egui::StrokeKind::Outside);
-            // bottom bar
             ui.painter().line_segment(
                 [
                     egui::pos2(box_r.left() + 2.0, box_r.bottom() - 2.5),
@@ -1190,14 +1258,27 @@ fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
                 ],
                 s,
             );
-            // down arrow
-            let tip = egui::pos2(c.x, c.y + 11.0);
+            let tip_pt = egui::pos2(c.x, c.y + 11.0);
+            ui.painter()
+                .line_segment([egui::pos2(c.x - 4.0, c.y + 6.0), tip_pt], s);
+            ui.painter()
+                .line_segment([egui::pos2(c.x + 4.0, c.y + 6.0), tip_pt], s);
+        }
+        IconKind::Pin => {
+            // Simple pin / thumbtack
+            ui.painter().circle_stroke(c + Vec2::new(0.0, -2.0), 4.5, s);
             ui.painter().line_segment(
-                [egui::pos2(c.x - 4.0, c.y + 6.0), tip],
+                [
+                    egui::pos2(c.x, c.y + 2.0),
+                    egui::pos2(c.x, c.y + 10.0),
+                ],
                 s,
             );
             ui.painter().line_segment(
-                [egui::pos2(c.x + 4.0, c.y + 6.0), tip],
+                [
+                    egui::pos2(c.x - 5.0, c.y + 1.0),
+                    egui::pos2(c.x + 5.0, c.y + 1.0),
+                ],
                 s,
             );
         }

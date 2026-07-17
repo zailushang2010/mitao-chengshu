@@ -161,17 +161,26 @@ impl TrayService {
 }
 
 /// Show / restore control window above PotPlayer instances.
-/// Uses a short TOPMOST flash, then clears it so minimize works.
+/// Flash TOPMOST then clear — caller may re-pin with `set_main_window_topmost(true)`.
 pub fn force_show_main_window() {
     let Some(hwnd) = find_main_hwnd() else {
         return;
     };
     raise_hwnd(hwnd, true);
-    // Critical: leave TOPMOST off, otherwise the window cannot be minimized normally
     set_topmost(hwnd, false);
 }
 
-/// Explicitly set/clear always-on-top (normally should stay false).
+/// Raise and keep on top (for 播放中可操作). Pair with clear when minimized / idle.
+pub fn force_show_and_pin() {
+    let Some(hwnd) = find_main_hwnd() else {
+        return;
+    };
+    raise_hwnd(hwnd, true);
+    set_topmost(hwnd, true);
+}
+
+/// Explicitly set/clear always-on-top.
+/// Does NOT restore/show — safe to call while minimized (only clears z-order flag).
 pub fn set_main_window_topmost(topmost: bool) {
     let Some(hwnd) = find_main_hwnd() else {
         return;
