@@ -383,14 +383,16 @@ impl eframe::App for SuijiApp {
                             egui::Frame::NONE
                                 .fill(BG_SOFT)
                                 .stroke(Stroke::new(1.0, LINE))
-                                .inner_margin(5.0)
+                                .inner_margin(8.0)
                                 .show(ui, |ui| {
-                                    let gap = 3.0;
+                                    let gap = 6.0;
                                     let total_w = ui.available_width();
                                     let cell_w = ((total_w - gap * (cols as f32 - 1.0))
                                         / cols as f32)
-                                        .max(32.0);
-                                    let cell_h = (cell_w * 10.0 / 16.0).min(56.0);
+                                        .max(48.0);
+                                    // Larger tiles so preview fills vertical space (less blank under it)
+                                    // ~16:10 aspect, allow up to ~118px tall
+                                    let cell_h = (cell_w * 10.0 / 16.0).clamp(78.0, 118.0);
 
                                     for r in 0..rows {
                                         ui.horizontal(|ui| {
@@ -578,10 +580,11 @@ impl eframe::App for SuijiApp {
                             .map(|r| r.width())
                             .unwrap_or(440.0)
                     });
-                    // Keep a tall enough shell so the settings modal never fills the whole window
+                    // Fit height to content (larger preview already fills more space).
+                    // Floor keeps room for settings modal without huge empty strip.
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
                         w.clamp(500.0, 680.0),
-                        used_h.clamp(780.0, 1200.0),
+                        used_h.clamp(640.0, 1200.0),
                     )));
                     self.fit_height_frames = self.fit_height_frames.saturating_sub(1);
                     ctx.request_repaint();
@@ -1118,7 +1121,7 @@ fn preview_cell(
             egui::pos2(rect.left() + 4.0, rect.bottom() - 14.0),
             egui::Align2::LEFT_TOP,
             short,
-            egui::FontId::proportional(9.0),
+            egui::FontId::proportional(11.0),
             ON_INK,
         );
     }
