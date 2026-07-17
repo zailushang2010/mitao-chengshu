@@ -535,8 +535,10 @@ impl eframe::App for SuijiApp {
         if matches!(
             snap.phase,
             SessionPhase::Starting | SessionPhase::Stopping | SessionPhase::Playing
-        ) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        ) || snap.indexing
+        {
+            // Keep UI live while PotPlayer starts/stops or background index runs.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         self.sync_play_pin_state(ctx, snap.phase);
@@ -645,6 +647,7 @@ impl eframe::App for SuijiApp {
                                     || {
                                         self.session.set_media_mode(MediaMode::Movie);
                                         self.slide_tex = None;
+                                        self.textures.clear();
                                         self.fit_height_frames = 6;
                                         self.show_toast("已切换到电影模式");
                                     },
@@ -657,6 +660,7 @@ impl eframe::App for SuijiApp {
                                     || {
                                         self.session.set_media_mode(MediaMode::Image);
                                         self.slide_tex = None;
+                                        self.textures.clear();
                                         self.fit_height_frames = 6;
                                         self.show_toast("已切换到图片模式 · 预览后开启幻灯");
                                     },

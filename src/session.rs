@@ -42,6 +42,8 @@ pub struct SessionSnapshot {
     pub media_mode: MediaMode,
     pub slideshow_interval_secs: u8,
     pub image_play_style: ImagePlayStyle,
+    /// Background library scan in progress for the active mode.
+    pub indexing: bool,
 }
 
 impl Default for SessionSnapshot {
@@ -59,14 +61,24 @@ impl Default for SessionSnapshot {
             media_mode: MediaMode::Movie,
             slideshow_interval_secs: 5,
             image_play_style: ImagePlayStyle::Slideshow,
+            indexing: false,
         }
     }
 }
 
 struct Inner {
     config: Config,
-    library: Library,
-    history: History,
+    /// Per-mode library cache so 电影↔图片 switch does not re-walk disks.
+    movie_library: Library,
+    image_library: Library,
+    movie_indexed: bool,
+    image_indexed: bool,
+    movie_scan_epoch: u64,
+    image_scan_epoch: u64,
+    movie_scan_busy: bool,
+    image_scan_busy: bool,
+    movie_history: History,
+    image_history: History,
     phase: SessionPhase,
     /// Selected for play (not launched yet)
     preview_files: Vec<PathBuf>,
@@ -76,6 +88,98 @@ struct Inner {
     ui_count: usize,
 }
 
+impl Inner {
+    fn library(&self) -> &Library {
+        match self.config.media_mode {
+            MediaMode::Movie => &self.movie_library,
+            MediaMode::Image => &self.image_library,
+        }
+    }
+
+    fn history(&self) -> &History {
+        match self.config.media_mode {
+            MediaMode::Movie => &self.movie_history,
+            MediaMode::Image => &self.image_history,
+        }
+    }
+
+    fn history_mut(&mut self) -> &mut History {
+        match self.config.media_mode {
+            MediaMode::Movie => &mut self.movie_history,
+            MediaMode::Image => &mut self.image_history,
+        }
+    }
+
+    fn is_indexed(&self, mode: MediaMode) -> bool {
+        match mode {
+            MediaMode::Movie => self.movie_indexed,
+            MediaMode::Image => self.image_indexed,
+        }
+    }
+
+    fn is_scan_busy(&self, mode: MediaMode) -> bool {
+        match mode {
+            MediaMode::Movie => self.movie_scan_busy,
+            MediaMode::Image => self.image_scan_busy,
+        }
+    }
+
+    fn set_scan_busy(&mut self, mode: MediaMode, busy: bool) {
+        match mode {
+            MediaMode::Movie => self.movie_scan_busy = busy,
+            MediaMode::Image => self.image_scan_busy = busy,
+        }
+    }
+
+    fn set_library(&mut self, mode: MediaMode, lib: Library) {
+        match mode {
+            MediaMode::Movie => {
+                self.movie_library = lib;
+                self.movie_indexed = true;
+                self.movie_scan_busy = false;
+            }
+            MediaMode::Image => {
+                self.image_library = lib;
+                self.image_indexed = true;
+                self.image_scan_busy = false;
+            }
+        }
+    }
+
+    fn invalidate_mode(&mut self, mode: MediaMode) {
+        match mode {
+            MediaMode::Movie => {
+                self.movie_library = Library::empty();
+                self.movie_indexed = false;
+            }
+            MediaMode::Image => {
+                self.image_library = Library::empty();
+                self.image_indexed = false;
+            }
+        }
+    }
+
+    fn bump_scan_epoch(&mut self, mode: MediaMode) -> u64 {
+        match mode {
+            MediaMode::Movie => {
+                self.movie_scan_epoch = self.movie_scan_epoch.wrapping_add(1);
+                self.movie_scan_epoch
+            }
+            MediaMode::Image => {
+                self.image_scan_epoch = self.image_scan_epoch.wrapping_add(1);
+                self.image_scan_epoch
+            }
+        }
+    }
+
+    fn scan_epoch(&self, mode: MediaMode) -> u64 {
+        match mode {
+            MediaMode::Movie => self.movie_scan_epoch,
+            MediaMode::Image => self.image_scan_epoch,
+        }
+    }
+}
+
 pub struct SessionHandle {
     inner: Arc<Mutex<Inner>>,
 }
@@ -83,15 +187,22 @@ pub struct SessionHandle {
 impl SessionHandle {
     pub fn new(config: Config) -> Self {
         let mode = config.media_mode;
-        let history = load_history(mode);
-        let roots = config.roots_for(mode);
-        let exts = config.extensions_for(mode).to_vec();
-        let library = scan_config_roots(&roots, &exts);
         let ui_count = config.default_count_for(mode);
-        let inner = Inner {
+        // Load both histories once; only scan the active mode at boot (async via rescan).
+        let movie_history = History::load();
+        let image_history = History::load_images();
+        let mut inner = Inner {
             config,
-            library,
-            history,
+            movie_library: Library::empty(),
+            image_library: Library::empty(),
+            movie_indexed: false,
+            image_indexed: false,
+            movie_scan_epoch: 0,
+            image_scan_epoch: 0,
+            movie_scan_busy: false,
+            image_scan_busy: false,
+            movie_history,
+            image_history,
             phase: SessionPhase::Idle,
             preview_files: Vec::new(),
             items: Vec::new(),
@@ -99,9 +210,21 @@ impl SessionHandle {
             last_errors: Vec::new(),
             ui_count,
         };
-        Self {
-            inner: Arc::new(Mutex::new(inner)),
+        // Initial index for active mode only (keeps other mode for first switch).
+        let roots = inner.config.roots_for(mode);
+        if roots.is_empty() {
+            inner.set_library(mode, Library::empty());
+            inner.message = idle_message(&inner);
+        } else {
+            inner.message = "索引中…".into();
         }
+        let handle = Self {
+            inner: Arc::new(Mutex::new(inner)),
+        };
+        if !roots.is_empty() {
+            handle.begin_scan(mode);
+        }
+        handle
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -140,13 +263,14 @@ impl SessionHandle {
             current_files,
             has_preview: !g.preview_files.is_empty(),
             items,
-            library_count: g.library.len(),
+            library_count: g.library().len(),
             library_root: g.config.library_label_for(mode),
             library_roots: g.config.roots_for(mode),
             last_errors: g.last_errors.clone(),
             media_mode: mode,
             slideshow_interval_secs: g.config.slideshow_interval_secs,
             image_play_style: g.config.image_play_style,
+            indexing: g.is_scan_busy(mode),
         }
     }
 
@@ -155,7 +279,7 @@ impl SessionHandle {
     }
 
     pub fn set_media_mode(&self, mode: MediaMode) {
-        let pids = {
+        let (pids, need_scan, cfg_to_save) = {
             let mut g = self.inner.lock().unwrap();
             if g.config.media_mode == mode {
                 return;
@@ -178,27 +302,67 @@ impl SessionHandle {
             g.config.media_mode = mode;
             // Each mode remembers its own pick count.
             g.ui_count = g.config.default_count_for(mode);
-            let _ = crate::config::save(&g.config);
             g.preview_files.clear();
             g.items.clear();
-            g.history = load_history(mode);
-            pids
+            g.phase = SessionPhase::Idle;
+            let cfg_to_save = g.config.clone();
+            let need_scan = !g.is_indexed(mode) && !g.is_scan_busy(mode);
+            if g.is_scan_busy(mode) {
+                g.message = "索引中…".into();
+            } else if g.is_indexed(mode) {
+                g.message = idle_message(&g);
+            } else {
+                g.message = "索引中…".into();
+            }
+            (pids, need_scan, cfg_to_save)
         };
+        // Disk I/O off the UI thread
+        thread::spawn(move || {
+            let _ = crate::config::save(&cfg_to_save);
+        });
         if !pids.is_empty() {
-            potplayer::kill_pids(&pids);
+            thread::spawn(move || {
+                potplayer::kill_pids(&pids);
+            });
         }
-        let (roots, exts) = {
-            let g = self.inner.lock().unwrap();
-            (
-                g.config.roots_for(mode),
-                g.config.extensions_for(mode).to_vec(),
-            )
+        if need_scan {
+            self.begin_scan(mode);
+        }
+    }
+
+    /// Background scan for a media mode; results fill that mode's cache.
+    fn begin_scan(&self, mode: MediaMode) {
+        let (roots, exts, epoch) = {
+            let mut g = self.inner.lock().unwrap();
+            let roots = g.config.roots_for(mode);
+            let exts = g.config.extensions_for(mode).to_vec();
+            if roots.is_empty() {
+                g.set_library(mode, Library::empty());
+                if g.config.media_mode == mode && g.phase == SessionPhase::Idle {
+                    g.message = idle_message(&g);
+                }
+                return;
+            }
+            let epoch = g.bump_scan_epoch(mode);
+            g.set_scan_busy(mode, true);
+            if g.config.media_mode == mode {
+                g.message = "索引中…".into();
+            }
+            (roots, exts, epoch)
         };
-        let lib = scan_config_roots(&roots, &exts);
-        let mut g = self.inner.lock().unwrap();
-        g.library = lib;
-        g.phase = SessionPhase::Idle;
-        g.message = idle_message(&g);
+
+        let handle = self.inner.clone();
+        thread::spawn(move || {
+            let lib = scan_config_roots(&roots, &exts);
+            let mut g = handle.lock().unwrap();
+            if g.scan_epoch(mode) != epoch {
+                return; // superseded by a newer scan for this mode
+            }
+            g.set_library(mode, lib);
+            if g.config.media_mode == mode && g.phase == SessionPhase::Idle {
+                g.message = idle_message(&g);
+            }
+        });
     }
 
     pub fn set_slideshow_interval(&self, secs: u8) {
@@ -292,7 +456,7 @@ impl SessionHandle {
             let item = g.items.remove(index);
             if g.items.is_empty() {
                 g.phase = SessionPhase::Idle;
-                g.message = format!("就绪 · 已索引 {} 部", g.library.len());
+                g.message = format!("就绪 · 已索引 {} 部", g.library().len());
             } else {
                 g.message = format!("播放中 · {} 部", g.items.len());
             }
@@ -328,41 +492,62 @@ impl SessionHandle {
     /// Replace all roots with a single path (legacy helper).
     #[allow(dead_code)]
     pub fn update_library_path(&self, path: String) {
-        let mut g = self.inner.lock().unwrap();
-        g.config.library_paths = if path.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![path]
+        let mode = {
+            let mut g = self.inner.lock().unwrap();
+            g.config.library_paths = if path.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![path]
+            };
+            g.config = g.config.clone().normalize();
+            let mode = g.config.media_mode;
+            g.invalidate_mode(mode);
+            g.message = "索引中…".into();
+            let cfg = g.config.clone();
+            drop(g);
+            thread::spawn(move || {
+                let _ = crate::config::save(&cfg);
+            });
+            mode
         };
-        g.config = g.config.clone().normalize();
-        let _ = crate::config::save(&g.config);
-        g.message = "索引中…".into();
-        drop(g);
-        self.rescan();
+        self.begin_scan(mode);
     }
 
     pub fn add_library_path(&self, path: String) {
-        let mut g = self.inner.lock().unwrap();
-        let mode = g.config.media_mode;
-        g.config.add_path_for(mode, path);
-        let _ = crate::config::save(&g.config);
-        g.message = "索引中…".into();
-        drop(g);
-        self.rescan();
+        let mode = {
+            let mut g = self.inner.lock().unwrap();
+            let mode = g.config.media_mode;
+            g.config.add_path_for(mode, path);
+            g.invalidate_mode(mode);
+            g.message = "索引中…".into();
+            let cfg = g.config.clone();
+            drop(g);
+            thread::spawn(move || {
+                let _ = crate::config::save(&cfg);
+            });
+            mode
+        };
+        self.begin_scan(mode);
     }
 
     /// Remove a library root. Returns the removed path for UI feedback.
     pub fn remove_library_path(&self, index: usize) -> Option<String> {
-        let mut g = self.inner.lock().unwrap();
-        let mode = g.config.media_mode;
-        let removed = g.config.remove_path_for(mode, index);
+        let (removed, mode) = {
+            let mut g = self.inner.lock().unwrap();
+            let mode = g.config.media_mode;
+            let removed = g.config.remove_path_for(mode, index);
+            if removed.is_some() {
+                g.invalidate_mode(mode);
+                g.message = "索引中…".into();
+                let cfg = g.config.clone();
+                thread::spawn(move || {
+                    let _ = crate::config::save(&cfg);
+                });
+            }
+            (removed, mode)
+        };
         if removed.is_some() {
-            let _ = crate::config::save(&g.config);
-            g.message = "索引中…".into();
-        }
-        drop(g);
-        if removed.is_some() {
-            self.rescan();
+            self.begin_scan(mode);
         }
         removed
     }
@@ -374,20 +559,14 @@ impl SessionHandle {
     }
 
     pub fn rescan(&self) {
-        let mut g = self.inner.lock().unwrap();
-        let mode = g.config.media_mode;
-        let roots = g.config.roots_for(mode);
-        let exts = g.config.extensions_for(mode).to_vec();
-        g.message = "索引中…".into();
-        drop(g);
-
-        let lib = scan_config_roots(&roots, &exts);
-
-        let mut g = self.inner.lock().unwrap();
-        g.library = lib;
-        if g.phase == SessionPhase::Idle {
-            g.message = idle_message(&g);
-        }
+        let mode = {
+            let mut g = self.inner.lock().unwrap();
+            let mode = g.config.media_mode;
+            // Keep old cache visible until new scan lands; just mark busy.
+            g.message = "索引中…".into();
+            mode
+        };
+        self.begin_scan(mode);
     }
 
     /// Randomly pick a slate into preview only — does not launch PotPlayer.
@@ -396,16 +575,21 @@ impl SessionHandle {
         if g.phase != SessionPhase::Idle {
             return;
         }
-        if g.library.is_empty() {
+        if g.is_scan_busy(g.config.media_mode) {
+            g.message = "片库索引中，请稍候…".into();
+            return;
+        }
+        if g.library().is_empty() {
             g.message = "片库为空，无法预览".into();
             return;
         }
         let n = g.config.clamp_count_for(g.config.media_mode, g.ui_count);
+        let avoid = g.history().as_path_set();
         let chosen = picker::pick(
-            &g.library.files,
+            &g.library().files.clone(),
             n,
             g.config.avoid_recent,
-            &g.history.as_path_set(),
+            &avoid,
         );
         if chosen.is_empty() {
             g.message = "未能选出影片".into();
@@ -559,13 +743,6 @@ impl SessionHandle {
     }
 }
 
-fn load_history(mode: MediaMode) -> History {
-    match mode {
-        MediaMode::Movie => History::load(),
-        MediaMode::Image => History::load_images(),
-    }
-}
-
 fn save_history(mode: MediaMode, history: &History) {
     let _ = match mode {
         MediaMode::Movie => history.save(),
@@ -578,7 +755,10 @@ fn idle_message(g: &Inner) -> String {
         MediaMode::Movie => "部",
         MediaMode::Image => "张",
     };
-    if g.library.is_empty() {
+    if g.is_scan_busy(g.config.media_mode) {
+        return "索引中…".into();
+    }
+    if g.library().is_empty() {
         if g.config.roots_for(g.config.media_mode).is_empty() {
             format!("请先设置{}库目录", g.config.media_mode.label())
         } else {
@@ -587,7 +767,7 @@ fn idle_message(g: &Inner) -> String {
     } else if g.preview_files.is_empty() {
         format!(
             "就绪 · 已索引 {} {} · 先「随机预览」",
-            g.library.len(),
+            g.library().len(),
             unit
         )
     } else {
@@ -650,8 +830,9 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         let paths: Vec<PathBuf> = launched.iter().map(|i| i.path.clone()).collect();
         let hist_size = g.config.recent_history_size;
         let mode = g.config.media_mode;
-        g.history.push_many(&paths, hist_size);
-        save_history(mode, &g.history);
+        g.history_mut().push_many(&paths, hist_size);
+        let hist = g.history().clone();
+        save_history(mode, &hist);
         // Keep preview in sync with what actually launched
         g.preview_files = paths.clone();
         g.items = launched;

@@ -85,14 +85,15 @@ fn main() -> eframe::Result<()> {
     ));
 
     let session = SessionHandle::new(cfg);
+    // SessionHandle::new already starts a background scan for the active mode.
     if n_roots == 0 {
         log_line("session: no library — UI will open settings");
     } else {
-        session.rescan();
+        let snap = session.snapshot();
         log_line(&format!(
-            "session: indexed {} files from {} roots",
-            session.snapshot().library_count,
-            session.snapshot().library_roots.len()
+            "session: indexing in background · roots={} · mode={:?}",
+            snap.library_roots.len(),
+            snap.media_mode
         ));
     }
 
