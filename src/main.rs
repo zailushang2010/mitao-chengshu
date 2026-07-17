@@ -3,6 +3,7 @@
 mod app;
 mod brand;
 mod config;
+mod blacklist;
 mod history;
 mod index_cache;
 mod library;

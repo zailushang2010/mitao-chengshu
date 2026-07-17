@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::blacklist::Blacklist;
 use crate::config::{Config, ImagePlayStyle, MediaMode};
 use crate::history::History;
 use crate::library::Library;
@@ -94,6 +95,8 @@ struct Inner {
     image_scan_busy: bool,
     movie_history: History,
     image_history: History,
+    movie_blacklist: Blacklist,
+    image_blacklist: Blacklist,
     phase: SessionPhase,
     /// Active mode's preview slate (synced from per-mode stores on switch).
     preview_files: Vec<PathBuf>,
@@ -134,6 +137,20 @@ impl Inner {
         match self.config.media_mode {
             MediaMode::Movie => &mut self.movie_history,
             MediaMode::Image => &mut self.image_history,
+        }
+    }
+
+    fn blacklist(&self) -> &Blacklist {
+        match self.config.media_mode {
+            MediaMode::Movie => &self.movie_blacklist,
+            MediaMode::Image => &self.image_blacklist,
+        }
+    }
+
+    fn blacklist_mut(&mut self) -> &mut Blacklist {
+        match self.config.media_mode {
+            MediaMode::Movie => &mut self.movie_blacklist,
+            MediaMode::Image => &mut self.image_blacklist,
         }
     }
 
@@ -221,6 +238,8 @@ impl SessionHandle {
         // Load both histories once; only scan the active mode at boot (async via rescan).
         let movie_history = History::load();
         let image_history = History::load_images();
+        let movie_blacklist = Blacklist::load_movies();
+        let image_blacklist = Blacklist::load_images();
         let mut inner = Inner {
             config,
             movie_library: Library::empty(),
@@ -233,6 +252,8 @@ impl SessionHandle {
             image_scan_busy: false,
             movie_history,
             image_history,
+            movie_blacklist,
+            image_blacklist,
             phase: SessionPhase::Idle,
             preview_files: Vec::new(),
             movie_preview: Vec::new(),
@@ -841,14 +862,22 @@ impl SessionHandle {
         }
         let n = g.config.clamp_count_for(g.config.media_mode, g.ui_count);
         let avoid = g.history().as_path_set();
+        let blocked = g.blacklist().as_path_set();
+        let lib_files = g.library().files.clone();
         let chosen = picker::pick(
-            &g.library().files.clone(),
+            &lib_files,
             n,
             g.config.avoid_recent,
             &avoid,
+            &blocked,
         );
         if chosen.is_empty() {
-            g.message = "未能选出影片".into();
+            let eligible = lib_files.len().saturating_sub(blocked.len());
+            g.message = if eligible == 0 && !blocked.is_empty() {
+                "可用片源已被拉黑筛空，请在设置中管理黑名单".into()
+            } else {
+                "未能选出影片".into()
+            };
             g.preview_files.clear();
             sync_preview_store(&mut g);
             return;
@@ -872,6 +901,56 @@ impl SessionHandle {
         } else {
             g.message = preview_ready_message(&g);
         }
+    }
+
+    /// Remove from preview and permanently blacklist (never pick again).
+    pub fn blacklist_preview_item(&self, index: usize) -> Option<PathBuf> {
+        let (path, mode) = {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Idle || index >= g.preview_files.len() {
+                return None;
+            }
+            let path = g.preview_files.remove(index);
+            g.blacklist_mut().add(&path);
+            let mode = g.config.media_mode;
+            sync_preview_store(&mut g);
+            if g.preview_files.is_empty() {
+                g.message = idle_message(&g);
+            } else {
+                g.message = preview_ready_message(&g);
+            }
+            (path, mode)
+        };
+        {
+            let g = self.inner.lock().unwrap();
+            let _ = match mode {
+                MediaMode::Movie => g.movie_blacklist.save_movies(),
+                MediaMode::Image => g.image_blacklist.save_images(),
+            };
+        }
+        Some(path)
+    }
+
+    pub fn blacklist_count(&self) -> usize {
+        self.inner.lock().unwrap().blacklist().len()
+    }
+
+    /// Remove one path from the active mode blacklist (settings).
+    pub fn unblacklist_path(&self, path: &std::path::Path) {
+        let mode = {
+            let mut g = self.inner.lock().unwrap();
+            g.blacklist_mut().remove(path);
+            g.config.media_mode
+        };
+        let g = self.inner.lock().unwrap();
+        let _ = match mode {
+            MediaMode::Movie => g.movie_blacklist.save_movies(),
+            MediaMode::Image => g.image_blacklist.save_images(),
+        };
+    }
+
+    pub fn blacklist_paths(&self) -> Vec<PathBuf> {
+        self.inner.lock().unwrap().blacklist().as_path_set()
     }
 
     /// Launch current preview: movies → PotPlayer; images → in-app slideshow.

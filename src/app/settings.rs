@@ -344,6 +344,59 @@ impl SuijiApp {
                     .color(FAINT),
                 );
 
+                ui.add_space(12.0);
+                let bl_count = self.session.blacklist_count();
+                ui.label(
+                    RichText::new(format!(
+                        "黑名单（当前{}模式 · {} 条 · 不再被随机抽到）",
+                        mode.label(),
+                        bl_count
+                    ))
+                    .size(13.0)
+                    .color(MUTED),
+                );
+                ui.add_space(4.0);
+                if bl_count == 0 {
+                    ui.label(
+                        RichText::new("预览片单上点「拉黑」可加入")
+                            .size(11.0)
+                            .color(FAINT),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(100.0)
+                        .id_salt("blacklist_list")
+                        .show(ui, |ui| {
+                            let paths = self.session.blacklist_paths();
+                            let mut unban: Option<std::path::PathBuf> = None;
+                            for p in &paths {
+                                let name = p
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| p.display().to_string());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(truncate_path(&name, 28))
+                                            .size(12.5)
+                                            .color(INK),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if mini_text_btn(ui, "移出").clicked() {
+                                                unban = Some(p.clone());
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                            if let Some(p) = unban {
+                                self.session.unblacklist_path(&p);
+                                self.show_toast("已从黑名单移出");
+                            }
+                        });
+                }
+
                 ui.add_space(16.0);
                 if primary_btn(ui, "完成", true).clicked() {
                     finish_clicked = true;

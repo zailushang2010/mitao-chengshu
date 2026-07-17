@@ -3,27 +3,36 @@ use rand::thread_rng;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Pick up to `n` videos. When `avoid_recent` is true, prefer files not in history.
-/// If not enough after filtering, fall back to the full library.
+/// Pick up to `n` videos.
+/// - `blacklist`: hard exclude (never pick; if nothing left → empty).
+/// - `avoid_recent`: soft prefer non-history; may fall back into recent.
 pub fn pick(
     library: &[PathBuf],
     n: usize,
     avoid_recent: bool,
     recent: &[PathBuf],
+    blacklist: &[PathBuf],
 ) -> Vec<PathBuf> {
     if library.is_empty() || n == 0 {
         return Vec::new();
     }
 
-    let n = n.min(library.len());
+    let blocked: HashSet<String> = blacklist.iter().map(|p| normalize_key(p)).collect();
+    let eligible: Vec<PathBuf> = library
+        .iter()
+        .filter(|p| !blocked.contains(&normalize_key(p)))
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
+        return Vec::new();
+    }
+
+    let n = n.min(eligible.len());
     let mut rng = thread_rng();
 
     let preferred: Vec<PathBuf> = if avoid_recent && !recent.is_empty() {
-        let recent_set: HashSet<String> = recent
-            .iter()
-            .map(|p| normalize_key(p))
-            .collect();
-        let filtered: Vec<_> = library
+        let recent_set: HashSet<String> = recent.iter().map(|p| normalize_key(p)).collect();
+        let filtered: Vec<_> = eligible
             .iter()
             .filter(|p| !recent_set.contains(&normalize_key(p)))
             .cloned()
@@ -31,11 +40,10 @@ pub fn pick(
         if filtered.len() >= n {
             filtered
         } else if filtered.is_empty() {
-            library.to_vec()
+            eligible
         } else {
-            // Prefer non-recent first, then fill from recent pool.
             let mut pool = filtered;
-            let mut rest: Vec<_> = library
+            let mut rest: Vec<_> = eligible
                 .iter()
                 .filter(|p| recent_set.contains(&normalize_key(p)))
                 .cloned()
@@ -45,7 +53,7 @@ pub fn pick(
             pool
         }
     } else {
-        library.to_vec()
+        eligible
     };
 
     let mut pool = preferred;
@@ -69,7 +77,7 @@ mod tests {
     #[test]
     fn pick_n_greater_than_library_returns_all() {
         let lib = paths(&["a.mkv", "b.mkv"]);
-        let got = pick(&lib, 10, false, &[]);
+        let got = pick(&lib, 10, false, &[], &[]);
         assert_eq!(got.len(), 2);
     }
 
@@ -78,7 +86,7 @@ mod tests {
         let lib = paths(&["a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv", "f.mkv"]);
         let recent = paths(&["a.mkv", "b.mkv", "c.mkv", "d.mkv"]);
         for _ in 0..20 {
-            let got = pick(&lib, 2, true, &recent);
+            let got = pick(&lib, 2, true, &recent, &[]);
             assert_eq!(got.len(), 2);
             for g in &got {
                 let s = g.to_string_lossy();
@@ -91,7 +99,26 @@ mod tests {
     fn avoid_when_exhausted_still_returns() {
         let lib = paths(&["a.mkv", "b.mkv"]);
         let recent = paths(&["a.mkv", "b.mkv"]);
-        let got = pick(&lib, 2, true, &recent);
+        let got = pick(&lib, 2, true, &recent, &[]);
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn blacklist_never_picked() {
+        let lib = paths(&["a.mkv", "b.mkv", "c.mkv"]);
+        let blocked = paths(&["a.mkv", "b.mkv"]);
+        for _ in 0..15 {
+            let got = pick(&lib, 2, false, &[], &blocked);
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].to_string_lossy(), "c.mkv");
+        }
+    }
+
+    #[test]
+    fn all_blacklisted_returns_empty() {
+        let lib = paths(&["a.mkv", "b.mkv"]);
+        let blocked = paths(&["a.mkv", "b.mkv"]);
+        let got = pick(&lib, 2, false, &[], &blocked);
+        assert!(got.is_empty());
     }
 }

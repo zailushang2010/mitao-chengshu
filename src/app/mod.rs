@@ -820,7 +820,7 @@ impl eframe::App for SuijiApp {
                             })
                             .show(ui, |ui| {
                                 ui.label(
-                                    RichText::new("预览片单 · 可剔除后再开播")
+                                    RichText::new("预览片单 · 剔除仅本轮 · 拉黑后不再抽到")
                                         .size(11.0)
                                         .color(FAINT),
                                 );
@@ -830,6 +830,7 @@ impl eframe::App for SuijiApp {
                                     .auto_shrink([false, true])
                                     .show(ui, |ui| {
                                         let mut remove_idx: Option<usize> = None;
+                                        let mut ban_idx: Option<usize> = None;
                                         for (i, path) in snap.current_files.iter().enumerate() {
                                             let name = path
                                                 .file_name()
@@ -845,7 +846,7 @@ impl eframe::App for SuijiApp {
                                                             RichText::new(format!(
                                                                 "{}. {}",
                                                                 i + 1,
-                                                                truncate_path(&name, 26)
+                                                                truncate_path(&name, 20)
                                                             ))
                                                             .size(12.0)
                                                             .color(INK),
@@ -853,6 +854,11 @@ impl eframe::App for SuijiApp {
                                                         ui.with_layout(
                                                             Layout::right_to_left(Align::Center),
                                                             |ui| {
+                                                                if mini_text_btn(ui, "拉黑")
+                                                                    .clicked()
+                                                                {
+                                                                    ban_idx = Some(i);
+                                                                }
                                                                 if mini_text_btn(ui, "剔除")
                                                                     .clicked()
                                                                 {
@@ -864,7 +870,19 @@ impl eframe::App for SuijiApp {
                                                 });
                                             ui.add_space(3.0);
                                         }
-                                        if let Some(i) = remove_idx {
+                                        if let Some(i) = ban_idx {
+                                            if let Some(p) = self.session.blacklist_preview_item(i)
+                                            {
+                                                let short = truncate_path(
+                                                    &p.file_name()
+                                                        .map(|n| n.to_string_lossy().to_string())
+                                                        .unwrap_or_default(),
+                                                    20,
+                                                );
+                                                self.fit_height_frames = 4;
+                                                self.show_toast(format!("已拉黑：{short}"));
+                                            }
+                                        } else if let Some(i) = remove_idx {
                                             self.session.remove_preview_item(i);
                                             self.fit_height_frames = 4;
                                             self.show_toast("已从预览中剔除");
