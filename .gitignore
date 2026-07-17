@@ -1,0 +1,8 @@
+/target
+/.superpowers
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+Thumbs.db
+config.json
+history.json
