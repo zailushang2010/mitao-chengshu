@@ -459,13 +459,14 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         g.message = msg;
     }
 
-    // PotPlayer steals focus — pull control panel back after tiling settles
+    // PotPlayer steals focus — briefly raise control panel, then release topmost
+    // so the user can minimize/close normally.
     thread::spawn(|| {
-        for delay in [200u64, 600, 1200, 2000] {
-            thread::sleep(std::time::Duration::from_millis(delay));
-            crate::tray::force_show_main_window();
-            crate::tray::set_main_window_topmost(true);
-        }
+        thread::sleep(std::time::Duration::from_millis(400));
+        crate::tray::force_show_main_window();
+        thread::sleep(std::time::Duration::from_millis(500));
+        crate::tray::force_show_main_window();
+        crate::tray::set_main_window_topmost(false);
     });
 }
 

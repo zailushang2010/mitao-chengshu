@@ -215,16 +215,13 @@ impl eframe::App for SuijiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        // After 开启本轮 finishes, PotPlayers steal focus — raise control panel
+        // After 开启本轮 finishes, briefly raise panel once — never sticky-topmost
+        // (sticky topmost blocked minimize and felt stuck).
         if self.last_phase == SessionPhase::Starting && snap.phase == SessionPhase::Playing {
             if !self.user_hid_to_tray {
                 self.show_window(ctx);
-                crate::tray::set_main_window_topmost(true);
+                crate::tray::set_main_window_topmost(false);
             }
-        }
-        // While playing, keep panel on top (unless user chose tray)
-        if snap.phase == SessionPhase::Playing && !self.user_hid_to_tray {
-            crate::tray::set_main_window_topmost(true);
         }
         if matches!(snap.phase, SessionPhase::Idle | SessionPhase::Stopping)
             && self.last_phase == SessionPhase::Playing

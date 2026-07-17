@@ -161,22 +161,22 @@ impl TrayService {
 }
 
 /// Show / restore control window above PotPlayer instances.
+/// Uses a short TOPMOST flash, then clears it so minimize works.
 pub fn force_show_main_window() {
     let Some(hwnd) = find_main_hwnd() else {
         return;
     };
     raise_hwnd(hwnd, true);
+    // Critical: leave TOPMOST off, otherwise the window cannot be minimized normally
+    set_topmost(hwnd, false);
 }
 
-/// Keep (or release) always-on-top so the panel stays usable during multi-play.
+/// Explicitly set/clear always-on-top (normally should stay false).
 pub fn set_main_window_topmost(topmost: bool) {
     let Some(hwnd) = find_main_hwnd() else {
         return;
     };
     set_topmost(hwnd, topmost);
-    if topmost {
-        raise_hwnd(hwnd, true);
-    }
 }
 
 fn find_main_hwnd() -> Option<HWND> {
@@ -215,7 +215,9 @@ fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
 
-        // Temporarily TOPMOST so we win over a wall of PotPlayer windows
+        use windows::Win32::UI::WindowsAndMessaging::HWND_NOTOPMOST;
+
+        // Brief TOPMOST to surface above PotPlayer, then always clear it
         if flash_topmost {
             let _ = SetWindowPos(
                 hwnd,
@@ -238,9 +240,10 @@ fn raise_hwnd(hwnd: HWND, flash_topmost: bool) {
         }
         let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
+        // Release always-on-top so user can minimize / switch windows
         let _ = SetWindowPos(
             hwnd,
-            Some(HWND_TOP),
+            Some(HWND_NOTOPMOST),
             0,
             0,
             0,
