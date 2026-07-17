@@ -13,6 +13,14 @@
 > 当前版本 **0.6.2**。开发流程：DEFINE → PLAN → BUILD → VERIFY → REVIEW  
 > 见 [`AGENTS.md`](./AGENTS.md) · [`docs/process/lifecycle.md`](./docs/process/lifecycle.md) · [`docs/product/DEFINE.md`](./docs/product/DEFINE.md)
 
+## 界面预览
+
+| 电影模式（工作台） | 图片模式 |
+|:---:|:---:|
+| ![电影模式](docs/images/ui-movie.jpg) | ![图片模式](docs/images/ui-image.jpg) |
+
+左侧可折叠操作栏 · 顶栏调节本轮数量 · 右侧主区预览网格
+
 ---
 
 ## 功能概览
