@@ -2,6 +2,9 @@
 
 本地媒体太多、选择困难时用的小工具：
 
+**开发流程（强制）**：DEFINE → PLAN → BUILD → VERIFY → REVIEW  
+→ 见 [`AGENTS.md`](./AGENTS.md) · [`docs/process/lifecycle.md`](./docs/process/lifecycle.md) · [`docs/product/DEFINE.md`](./docs/product/DEFINE.md)
+
 - **电影**：随机预览 → 确认后多开 PotPlayer 平铺播放  
 - **图片**：随机预览 → 确认后 **幻灯片** 或 **平铺墙**
 
