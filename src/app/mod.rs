@@ -4,7 +4,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Textur
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::MediaMode;
+use crate::config::{ImagePlayStyle, MediaMode};
 use crate::session::{SessionHandle, SessionPhase};
 use crate::thumb::ThumbCache;
 use crate::tray::{TrayCommand, TrayService};
@@ -391,6 +391,107 @@ impl SuijiApp {
                 });
             });
     }
+
+    fn draw_wall_overlay(&mut self, ctx: &egui::Context, paths: &[PathBuf]) {
+        let n = paths.len();
+        if n == 0 {
+            return;
+        }
+        // Ensure textures for wall
+        self.ensure_thumbs(paths, ctx);
+
+        egui::Area::new(egui::Id::new("wall_overlay"))
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter()
+                    .rect_filled(screen, 0.0, Color32::from_rgb(12, 12, 14));
+
+                // If one image focused (slide_tex set), show it large; click to back
+                if let Some((ref path, ref tex)) = self.slide_tex.clone() {
+                    let size = tex.size_vec2();
+                    let fit = (screen.width() / size.x)
+                        .min(screen.height() / size.y)
+                        .min(1.5);
+                    let draw = size * fit;
+                    let rect = egui::Rect::from_center_size(screen.center(), draw);
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    ui.painter().text(
+                        egui::pos2(screen.center().x, screen.bottom() - 24.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{name}  ·  点击返回平铺 · Esc 结束"),
+                        egui::FontId::proportional(13.0),
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+                    );
+                    let resp = ui.interact(screen, ui.id().with("wall_focus"), Sense::click());
+                    if resp.clicked() {
+                        self.slide_tex = None;
+                    }
+                    return;
+                }
+
+                let (rows, cols) = crate::tiler::rows_cols(n);
+                let margin = 16.0;
+                let gap = 8.0;
+                let area = egui::Rect::from_min_max(
+                    screen.min + egui::vec2(margin, margin + 8.0),
+                    screen.max - egui::vec2(margin, margin + 32.0),
+                );
+                let cell_w = ((area.width() - gap * (cols as f32 - 1.0)) / cols as f32).max(40.0);
+                let cell_h = ((area.height() - gap * (rows as f32 - 1.0)) / rows as f32).max(40.0);
+
+                for (idx, path) in paths.iter().enumerate() {
+                    let r = idx / cols;
+                    let c = idx % cols;
+                    let x = area.left() + c as f32 * (cell_w + gap);
+                    let y = area.top() + r as f32 * (cell_h + gap);
+                    let cell = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h));
+                    ui.painter()
+                        .rect_filled(cell, 2.0, Color32::from_rgb(28, 28, 32));
+                    let key = path.to_string_lossy().to_string();
+                    if let Some(tex) = self.textures.get(&key) {
+                        let size = tex.size_vec2();
+                        let fit = (cell.width() / size.x).min(cell.height() / size.y);
+                        let draw = size * fit;
+                        let img_r = egui::Rect::from_center_size(cell.center(), draw);
+                        ui.painter().image(
+                            tex.id(),
+                            img_r,
+                            egui::Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(1.0, 1.0),
+                            ),
+                            Color32::WHITE,
+                        );
+                    }
+                    let resp = ui.interact(cell, ui.id().with("wall_cell").with(idx), Sense::click());
+                    if resp.clicked() {
+                        let k = format!("slide:{}", path.display());
+                        if let Some(tex) = load_texture(ctx, &k, path) {
+                            self.slide_tex = Some((path.clone(), tex));
+                        }
+                    }
+                }
+
+                ui.painter().text(
+                    egui::pos2(screen.center().x, screen.bottom() - 12.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("平铺墙 · {n} 张 · 点击放大 · Esc 结束"),
+                    egui::FontId::proportional(13.0),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+                );
+            });
+    }
 }
 
 impl eframe::App for SuijiApp {
@@ -440,10 +541,14 @@ impl eframe::App for SuijiApp {
 
         self.sync_play_pin_state(ctx, snap.phase);
 
-        // Image slideshow tick
-        let image_slideshow = snap.media_mode == MediaMode::Image
+        // Image play: slideshow timer / wall keys
+        let image_playing = snap.media_mode == MediaMode::Image
             && snap.phase == SessionPhase::Playing
             && !snap.current_files.is_empty();
+        let image_slideshow =
+            image_playing && snap.image_play_style == ImagePlayStyle::Slideshow;
+        let image_wall = image_playing && snap.image_play_style == ImagePlayStyle::Wall;
+
         if image_slideshow {
             if self.last_phase != SessionPhase::Playing {
                 self.slide_index = 0;
@@ -457,8 +562,19 @@ impl eframe::App for SuijiApp {
                 &snap.current_files,
                 snap.slideshow_interval_secs as f32,
             );
-        } else if self.last_phase == SessionPhase::Playing
-            && snap.media_mode == MediaMode::Image
+        } else if image_wall {
+            if self.last_phase != SessionPhase::Playing {
+                self.slide_index = 0;
+                self.slide_tex = None;
+            }
+            // Esc ends wall
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.session.stop();
+                self.slide_tex = None;
+                self.show_toast("已关闭平铺墙");
+            }
+            ctx.request_repaint();
+        } else if self.last_phase == SessionPhase::Playing && snap.media_mode == MediaMode::Image
         {
             self.slide_tex = None;
         }
@@ -993,7 +1109,15 @@ impl eframe::App for SuijiApp {
                                         self.slide_elapsed = 0.0;
                                         self.slide_paused = false;
                                         self.slide_tex = None;
-                                        self.show_toast("幻灯开始 · Esc 结束");
+                                        let style = self.session.config_clone().image_play_style;
+                                        self.show_toast(match style {
+                                            ImagePlayStyle::Slideshow => {
+                                                "幻灯开始 · Esc 结束".into()
+                                            }
+                                            ImagePlayStyle::Wall => {
+                                                "平铺墙 · 点击放大 · Esc 结束".into()
+                                            }
+                                        });
                                     } else {
                                         self.show_toast("正在按预览片单开播…");
                                     }
@@ -1051,13 +1175,15 @@ impl eframe::App for SuijiApp {
             self.settings_modal(ctx);
         }
 
-        // Full-window slideshow on top of main UI when image mode is playing
+        // Full-window image play overlays
         if image_slideshow {
             self.draw_slideshow_overlay(
                 ctx,
                 &snap.current_files,
                 snap.slideshow_interval_secs,
             );
+        } else if image_wall {
+            self.draw_wall_overlay(ctx, &snap.current_files);
         }
     }
 
@@ -1239,28 +1365,57 @@ impl SuijiApp {
                 if mode == MediaMode::Image {
                     ui.add_space(12.0);
                     ui.label(
-                        RichText::new("幻灯片间隔（秒）")
+                        RichText::new("图片开启方式")
                             .size(13.0)
                             .color(MUTED),
                     );
                     ui.add_space(4.0);
-                    let iv = self.session.config_clone().slideshow_interval_secs;
+                    let style = self.session.config_clone().image_play_style;
                     ui.horizontal(|ui| {
-                        if small_step_btn(ui, "−").clicked() {
-                            self.session
-                                .set_slideshow_interval(iv.saturating_sub(1).max(1));
-                        }
-                        ui.label(
-                            RichText::new(format!("{iv}"))
-                                .size(16.0)
-                                .color(INK)
-                                .strong(),
+                        mode_chip(
+                            ui,
+                            "幻灯片",
+                            style == ImagePlayStyle::Slideshow,
+                            || {
+                                self.session
+                                    .set_image_play_style(ImagePlayStyle::Slideshow);
+                                self.show_toast("开启后将全屏幻灯播放");
+                            },
                         );
-                        if small_step_btn(ui, "+").clicked() {
-                            self.session.set_slideshow_interval(iv.saturating_add(1).min(60));
-                        }
-                        ui.label(RichText::new("秒 / 张").size(12.5).color(FAINT));
+                        ui.add_space(6.0);
+                        mode_chip(ui, "平铺墙", style == ImagePlayStyle::Wall, || {
+                            self.session.set_image_play_style(ImagePlayStyle::Wall);
+                            self.show_toast("开启后将平铺展示本轮图片");
+                        });
                     });
+
+                    if style == ImagePlayStyle::Slideshow {
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new("幻灯片间隔（秒）")
+                                .size(13.0)
+                                .color(MUTED),
+                        );
+                        ui.add_space(4.0);
+                        let iv = self.session.config_clone().slideshow_interval_secs;
+                        ui.horizontal(|ui| {
+                            if small_step_btn(ui, "−").clicked() {
+                                self.session
+                                    .set_slideshow_interval(iv.saturating_sub(1).max(1));
+                            }
+                            ui.label(
+                                RichText::new(format!("{iv}"))
+                                    .size(16.0)
+                                    .color(INK)
+                                    .strong(),
+                            );
+                            if small_step_btn(ui, "+").clicked() {
+                                self.session
+                                    .set_slideshow_interval(iv.saturating_add(1).min(60));
+                            }
+                            ui.label(RichText::new("秒 / 张").size(12.5).color(FAINT));
+                        });
+                    }
                 }
 
                 ui.add_space(14.0);

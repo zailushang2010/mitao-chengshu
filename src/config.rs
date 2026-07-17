@@ -23,6 +23,26 @@ fn default_slideshow_interval() -> u8 {
     5
 }
 
+/// How images open after 开启幻灯/开启.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePlayStyle {
+    /// Fullscreen timed slideshow
+    #[default]
+    Slideshow,
+    /// All preview images tiled on one wall
+    Wall,
+}
+
+impl ImagePlayStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            ImagePlayStyle::Slideshow => "幻灯片",
+            ImagePlayStyle::Wall => "平铺墙",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Legacy single path (kept for old configs / backward compatibility).
@@ -49,6 +69,9 @@ pub struct Config {
     /// Slideshow seconds per image (1–60).
     #[serde(default = "default_slideshow_interval")]
     pub slideshow_interval_secs: u8,
+    /// Slideshow or tile wall for image mode.
+    #[serde(default)]
+    pub image_play_style: ImagePlayStyle,
     pub close_session_on_exit: bool,
     /// If true, title-bar close (X) hides to tray instead of quitting.
     #[serde(default)]
@@ -95,6 +118,7 @@ impl Default for Config {
             ],
             image_extensions: default_image_extensions(),
             slideshow_interval_secs: 5,
+            image_play_style: ImagePlayStyle::Slideshow,
             close_session_on_exit: false,
             minimize_to_tray: false,
         }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::config::{Config, MediaMode};
+use crate::config::{Config, ImagePlayStyle, MediaMode};
 use crate::history::History;
 use crate::library::Library;
 use crate::picker;
@@ -41,6 +41,7 @@ pub struct SessionSnapshot {
     pub last_errors: Vec<String>,
     pub media_mode: MediaMode,
     pub slideshow_interval_secs: u8,
+    pub image_play_style: ImagePlayStyle,
 }
 
 impl Default for SessionSnapshot {
@@ -57,6 +58,7 @@ impl Default for SessionSnapshot {
             last_errors: Vec::new(),
             media_mode: MediaMode::Movie,
             slideshow_interval_secs: 5,
+            image_play_style: ImagePlayStyle::Slideshow,
         }
     }
 }
@@ -144,6 +146,7 @@ impl SessionHandle {
             last_errors: g.last_errors.clone(),
             media_mode: mode,
             slideshow_interval_secs: g.config.slideshow_interval_secs,
+            image_play_style: g.config.image_play_style,
         }
     }
 
@@ -199,6 +202,12 @@ impl SessionHandle {
     pub fn set_slideshow_interval(&self, secs: u8) {
         let mut g = self.inner.lock().unwrap();
         g.config.slideshow_interval_secs = secs.clamp(1, 60);
+        let _ = crate::config::save(&g.config);
+    }
+
+    pub fn set_image_play_style(&self, style: ImagePlayStyle) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.image_play_style = style;
         let _ = crate::config::save(&g.config);
     }
 
@@ -437,7 +446,14 @@ impl SessionHandle {
             g.phase = SessionPhase::Playing;
             g.items.clear();
             g.last_errors.clear();
-            g.message = format!("幻灯中 · {n} 张 · 空格暂停 · ←/→ 切换 · Esc 结束");
+            g.message = match g.config.image_play_style {
+                ImagePlayStyle::Slideshow => {
+                    format!("幻灯中 · {n} 张 · 空格暂停 · ←/→ 切换 · Esc 结束")
+                }
+                ImagePlayStyle::Wall => {
+                    format!("平铺墙 · {n} 张 · 点击放大 · Esc 结束")
+                }
+            };
             return;
         }
 
