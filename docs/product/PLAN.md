@@ -16,7 +16,7 @@
 | P0-done | done | 平铺根因：藏窗入格 + 全程几何守护 | DEFINE §7 电影网格 |
 | P1-1 | cancelled | 图片墙缩略图化 | 用户明确暂不需要图片向增强 |
 | P1-2 | done | 单实例启动加固（Event 唤醒 + 强力前置） | 二次启动不新开进程；托盘隐藏可拉回 |
-| P1-3 | todo | 拆分 `app/mod.rs`（settings/slideshow/buttons） | 编译通过；行为无回归 |
+| P1-3 | done | 拆分 `app/mod.rs` → widgets / media_view / settings | test+release 通过；行为等价 |
 | P1-4 | todo | 索引可取消 + 可选根目录缓存 | 大库二次启动更快 |
 | P2-1 | todo | 黑名单/不再抽到 | 剔除可持久排除 |
 | P2-2 | todo | 多显示器选择工作区 | 平铺落在指定屏 |

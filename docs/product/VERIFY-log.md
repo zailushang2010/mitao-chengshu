@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-07-17 · P1-3 拆分 app/mod.rs
+
+### DEFINE
+
+- 问题：`mod.rs` 过大难维护  
+- 范围：拆 widgets / media_view / settings，无行为变更  
+- 验收：`cargo test` + `cargo build --release` 通过  
+
+### VERIFY
+
+- [x] cargo test — 19 passed / 1 ignored  
+- [x] cargo build --release — Finished  
+- 行数约：mod 1106 / widgets 480 / settings 381 / media_view 291  
+
+### REVIEW
+
+- PLAN P1-3 → done；下一项 P1-4 索引缓存  
+
+---
+
 ## 2026-07-17 · P1-2 单实例加固
 
 ### DEFINE/PLAN
