@@ -578,10 +578,10 @@ impl eframe::App for SuijiApp {
                             .map(|r| r.width())
                             .unwrap_or(440.0)
                     });
+                    // Keep a tall enough shell so the settings modal never fills the whole window
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                        w.clamp(480.0, 640.0),
-                        // Prefer a roomier window; only shrink if content is huge
-                        used_h.clamp(560.0, 980.0),
+                        w.clamp(500.0, 680.0),
+                        used_h.clamp(780.0, 1200.0),
                     )));
                     self.fit_height_frames = self.fit_height_frames.saturating_sub(1);
                     ctx.request_repaint();
@@ -605,8 +605,10 @@ impl SuijiApp {
             .collapsible(false)
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_size([460.0, 560.0])
-            .min_size([420.0, 480.0])
+            // Smaller than main shell so margins remain around the modal
+            .default_size([440.0, 520.0])
+            .min_size([400.0, 420.0])
+            .max_size([500.0, 640.0])
             .open(&mut open)
             .frame(
                 egui::Frame::window(&ctx.style())
