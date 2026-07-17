@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -44,6 +45,8 @@ pub struct SessionSnapshot {
     pub image_play_style: ImagePlayStyle,
     /// Background library scan in progress for the active mode.
     pub indexing: bool,
+    /// Files matched so far during the active mode's scan (0 if idle).
+    pub indexing_found: usize,
     /// Movie PotPlayers still running while user is in 图片 mode (plan A).
     pub movie_in_background: bool,
     pub movie_background_count: usize,
@@ -65,6 +68,7 @@ impl Default for SessionSnapshot {
             slideshow_interval_secs: 5,
             image_play_style: ImagePlayStyle::Slideshow,
             indexing: false,
+            indexing_found: 0,
             movie_in_background: false,
             movie_background_count: 0,
         }
@@ -100,6 +104,8 @@ struct Inner {
     message: String,
     last_errors: Vec<String>,
     ui_count: usize,
+    /// Live counter while a background scan runs for any mode.
+    scan_found: Arc<AtomicUsize>,
 }
 
 impl Inner {
@@ -226,6 +232,7 @@ impl SessionHandle {
             message: "就绪 · 先「随机预览」再「开启播放」".into(),
             last_errors: Vec::new(),
             ui_count,
+            scan_found: Arc::new(AtomicUsize::new(0)),
         };
         // Initial index for active mode only (keeps other mode for first switch).
         let roots = inner.config.roots_for(mode);
@@ -297,6 +304,11 @@ impl SessionHandle {
             slideshow_interval_secs: g.config.slideshow_interval_secs,
             image_play_style: g.config.image_play_style,
             indexing: g.is_scan_busy(mode),
+            indexing_found: if g.is_scan_busy(mode) {
+                g.scan_found.load(Ordering::Relaxed)
+            } else {
+                0
+            },
             movie_in_background: g.parked_movie.is_some(),
             movie_background_count: g
                 .parked_movie
@@ -399,7 +411,7 @@ impl SessionHandle {
 
     /// Background scan for a media mode; results fill that mode's cache.
     fn begin_scan(&self, mode: MediaMode) {
-        let (roots, exts, epoch) = {
+        let (roots, exts, epoch, progress) = {
             let mut g = self.inner.lock().unwrap();
             let roots = g.config.roots_for(mode);
             let exts = g.config.extensions_for(mode).to_vec();
@@ -412,15 +424,28 @@ impl SessionHandle {
             }
             let epoch = g.bump_scan_epoch(mode);
             g.set_scan_busy(mode, true);
+            g.scan_found.store(0, Ordering::Relaxed);
+            let progress = g.scan_found.clone();
             if g.config.media_mode == mode {
                 g.message = "索引中…".into();
             }
-            (roots, exts, epoch)
+            (roots, exts, epoch, progress)
         };
 
         let handle = self.inner.clone();
         thread::spawn(move || {
-            let lib = scan_config_roots(&roots, &exts);
+            let paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+            let handle_msg = handle.clone();
+            let lib = Library::scan_many_with_progress(&paths, &exts, |n| {
+                progress.store(n, Ordering::Relaxed);
+                if n == 1 || n % 40 == 0 {
+                    if let Ok(mut g) = handle_msg.try_lock() {
+                        if g.config.media_mode == mode && g.is_scan_busy(mode) {
+                            g.message = format!("索引中… 已发现 {n} 个");
+                        }
+                    }
+                }
+            });
             let mut g = handle.lock().unwrap();
             if g.scan_epoch(mode) != epoch {
                 return; // superseded by a newer scan for this mode
@@ -430,6 +455,51 @@ impl SessionHandle {
                 g.message = idle_message(&g);
             }
         });
+    }
+
+    /// Drop dead PotPlayer PIDs from active items and parked background.
+    /// Returns true if anything changed (UI should refresh message).
+    pub fn reap_dead_players(&self) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        let mut changed = false;
+
+        if !g.items.is_empty() && g.config.media_mode == MediaMode::Movie {
+            let before = g.items.len();
+            g.items.retain(|i| potplayer::pid_alive(i.pid));
+            if g.items.len() != before {
+                changed = true;
+                if g.items.is_empty() && g.phase == SessionPhase::Playing {
+                    g.phase = SessionPhase::Idle;
+                    g.message = if g.preview_files.is_empty() {
+                        idle_message(&g)
+                    } else {
+                        format!(
+                            "播放器已全部关闭 · 预览仍保留 {} 部",
+                            g.preview_files.len()
+                        )
+                    };
+                } else if g.phase == SessionPhase::Playing {
+                    g.message = format!("播放中 · {} 部", g.items.len());
+                }
+            }
+        }
+
+        if let Some(ref mut parked) = g.parked_movie {
+            let before = parked.items.len();
+            parked.items.retain(|i| potplayer::pid_alive(i.pid));
+            if parked.items.len() != before {
+                changed = true;
+            }
+            if parked.items.is_empty() {
+                g.parked_movie = None;
+                if g.config.media_mode == MediaMode::Image && g.phase == SessionPhase::Idle {
+                    g.message = idle_message(&g);
+                }
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     pub fn set_slideshow_interval(&self, secs: u8) {
@@ -894,7 +964,12 @@ fn idle_message(g: &Inner) -> String {
         MediaMode::Image => "张",
     };
     if g.is_scan_busy(g.config.media_mode) {
-        return "索引中…".into();
+        let n = g.scan_found.load(Ordering::Relaxed);
+        return if n > 0 {
+            format!("索引中… 已发现 {n} 个")
+        } else {
+            "索引中…".into()
+        };
     }
     let bg = g
         .parked_movie
@@ -1005,14 +1080,6 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         thread::sleep(std::time::Duration::from_millis(600));
         crate::tray::force_show_and_pin();
     });
-}
-
-fn scan_config_roots(roots: &[String], exts: &[String]) -> Library {
-    if roots.is_empty() {
-        return Library::empty();
-    }
-    let paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
-    Library::scan_many(&paths, exts)
 }
 
 fn file_stem(p: &std::path::Path) -> String {

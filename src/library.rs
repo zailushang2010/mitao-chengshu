@@ -20,6 +20,15 @@ impl Library {
 
     /// Scan multiple roots recursively; merge and dedupe file paths.
     pub fn scan_many(roots: &[PathBuf], extensions: &[String]) -> Self {
+        Self::scan_many_with_progress(roots, extensions, |_| {})
+    }
+
+    /// Like `scan_many`, but invokes `on_found` after each matched media file.
+    pub fn scan_many_with_progress(
+        roots: &[PathBuf],
+        extensions: &[String],
+        mut on_found: impl FnMut(usize),
+    ) -> Self {
         let roots: Vec<PathBuf> = roots
             .iter()
             .filter(|r| !r.as_os_str().is_empty())
@@ -40,7 +49,7 @@ impl Library {
             if !root.is_dir() {
                 continue;
             }
-            collect_under(root, &ext_set, &mut files);
+            collect_under(root, &ext_set, &mut files, &mut on_found);
         }
 
         files.sort();
@@ -58,7 +67,12 @@ impl Library {
     }
 }
 
-fn collect_under(root: &Path, ext_set: &BTreeSet<String>, files: &mut Vec<PathBuf>) {
+fn collect_under(
+    root: &Path,
+    ext_set: &BTreeSet<String>,
+    files: &mut Vec<PathBuf>,
+    on_found: &mut impl FnMut(usize),
+) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -84,6 +98,7 @@ fn collect_under(root: &Path, ext_set: &BTreeSet<String>, files: &mut Vec<PathBu
                     .unwrap_or(false);
                 if ok {
                     files.push(path);
+                    on_found(files.len());
                 }
             }
         }

@@ -45,6 +45,8 @@ pub struct SuijiApp {
     slide_prev: Option<(PathBuf, TextureHandle)>,
     /// 0 = fully previous, 1 = fully current
     slide_fade: f32,
+    /// Seconds since last PotPlayer liveness check.
+    reap_accum: f32,
 }
 
 /// Toast life: enter 160ms → hold → exit 180ms (ease-out feel via alpha).
@@ -118,6 +120,7 @@ impl SuijiApp {
             slide_tex: None,
             slide_prev: None,
             slide_fade: 1.0,
+            reap_accum: 0.0,
         }
     }
 
@@ -617,11 +620,21 @@ impl eframe::App for SuijiApp {
             }
         }
 
+        // Reap closed PotPlayers ~1s (playing or parked background).
+        self.reap_accum += dt;
+        if self.reap_accum >= 1.0 {
+            self.reap_accum = 0.0;
+            if self.session.reap_dead_players() {
+                ctx.request_repaint();
+            }
+        }
+
         let snap = self.session.snapshot();
         if matches!(
             snap.phase,
             SessionPhase::Starting | SessionPhase::Stopping | SessionPhase::Playing
         ) || snap.indexing
+            || snap.movie_in_background
         {
             // Keep UI live while PotPlayer starts/stops or background index runs.
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -875,13 +888,28 @@ impl eframe::App for SuijiApp {
                                         snap.library_roots.len()
                                     )
                                 };
+                                let lib_line = if snap.indexing {
+                                    let unit = match snap.media_mode {
+                                        MediaMode::Movie => "部",
+                                        MediaMode::Image => "张",
+                                    };
+                                    if snap.indexing_found > 0 {
+                                        format!(
+                                            "{root_label} · 索引中 已发现 {} {unit}",
+                                            snap.indexing_found
+                                        )
+                                    } else {
+                                        format!("{root_label} · 索引中…")
+                                    }
+                                } else {
+                                    let unit = match snap.media_mode {
+                                        MediaMode::Movie => "部",
+                                        MediaMode::Image => "张",
+                                    };
+                                    format!("{root_label} · {} {unit}", snap.library_count)
+                                };
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{root_label} · {} 部",
-                                        snap.library_count
-                                    ))
-                                    .size(12.0)
-                                    .color(MUTED),
+                                    RichText::new(lib_line).size(12.0).color(MUTED),
                                 );
                             });
                         });
@@ -920,21 +948,32 @@ impl eframe::App for SuijiApp {
                                 });
                             });
 
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("统一音量").size(13.0).color(MUTED));
-                                let mut vol = cfg.volume_percent as f32;
-                                let slider = egui::Slider::new(&mut vol, 0.0..=100.0)
-                                    .show_value(false)
-                                    .trailing_fill(true);
-                                if ui.add_sized(Vec2::new(150.0, 16.0), slider).changed() {
-                                    self.session.set_volume(vol as u8);
-                                }
+                            // Volume: preference only — PotPlayer has no reliable CLI volume API.
+                            if snap.media_mode == MediaMode::Movie {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("音量偏好").size(13.0).color(MUTED),
+                                    );
+                                    let mut vol = cfg.volume_percent as f32;
+                                    let slider = egui::Slider::new(&mut vol, 0.0..=100.0)
+                                        .show_value(false)
+                                        .trailing_fill(true);
+                                    if ui.add_sized(Vec2::new(150.0, 16.0), slider).changed()
+                                    {
+                                        self.session.set_volume(vol as u8);
+                                    }
+                                    ui.label(
+                                        RichText::new(format!("{}%", cfg.volume_percent))
+                                            .size(12.0)
+                                            .color(MUTED),
+                                    );
+                                });
                                 ui.label(
-                                    RichText::new(format!("{}%", cfg.volume_percent))
-                                        .size(12.0)
-                                        .color(MUTED),
+                                    RichText::new("仅记在配置里，暂未自动控制 PotPlayer 音量")
+                                        .size(11.0)
+                                        .color(FAINT),
                                 );
-                            });
+                            }
 
                             ui.horizontal(|ui| {
                                 ui.label(

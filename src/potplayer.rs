@@ -5,7 +5,13 @@ use std::thread;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
+};
+
+/// Win32 STILL_ACTIVE exit code while process is running.
+const STILL_ACTIVE: u32 = 259;
 
 const CANDIDATES: &[&str] = &[
     r"C:\Program Files\DAUM\PotPlayer\PotPlayerMini64.exe",
@@ -82,6 +88,22 @@ pub fn kill_pid(pid: u32) -> Result<(), String> {
         result.map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// True if the process is still running (for reaping dead PotPlayers).
+pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code).is_ok();
+        let _ = CloseHandle(handle);
+        ok && code == STILL_ACTIVE
+    }
 }
 
 /// Focus / restore the main window of a PotPlayer process.
