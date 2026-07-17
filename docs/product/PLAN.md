@@ -21,7 +21,7 @@
 | P2-1 | done | 黑名单/不再抽到 | 拉黑持久排除；设置可移出；0.6.0 |
 | P2-wb | done | 工作台壳层 + 置顶修复 + 新图标 | 见 changes/2026-07-17-workbench-shell；0.6.1 |
 | P2-2 | done | 多显示器选择工作区 | 设置下拉；resolve_work_area；0.6.1 |
-| P2-3 | todo | VERIFY 手测清单自动化记录模板 | 每次发版有 log |
+| P2-3 | done | VERIFY 手测清单模板 + 脚本 | checklist + new-verify-entry + verify.ps1 |
 
 ---
 
@@ -65,4 +65,15 @@
 - [ ] DEFINE 已知限制已更新
 - [ ] README 与行为一致
 - [ ] 版本号 / `scripts/pack.ps1` 产物
-- [ ] `cargo test` + release 有证据
+- [ ] `pwsh -File scripts/verify.ps1`（或等价 cargo test + release）
+- [ ] `VERIFY-log.md` 有本版本条目 + 手测勾选（模板见 `VERIFY-checklist.md`）
+
+---
+
+## 下一候选（未排期）
+
+| 候选 | 说明 |
+|------|------|
+| 侧栏开合写 config | 重启保持工作台状态 |
+| 显示器按设备名匹配 | 热插拔后 index 更稳 |
+| pack 集成 verify 入口说明 | README 一节 |

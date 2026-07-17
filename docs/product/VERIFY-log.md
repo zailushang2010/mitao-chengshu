@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-07-17 · 0.6.1 · P2-3 手测模板落地
+
+### DEFINE/PLAN
+
+- `docs/product/changes/2026-07-17-verify-template-DEFINE-PLAN.md`
+- 基线清单：`docs/product/VERIFY-checklist.md`
+- 脚本：`scripts/verify.ps1` · `scripts/new-verify-entry.ps1`
+
+### 命令
+
+- [x] `cargo test` — 25 passed / 1 ignored（via `scripts/verify.ps1 -StopRunning`）
+- [x] `cargo build --release` — Finished（exe ~7.0 MB；脚本曾因路径编码误报 missing，已加固）
+
+### 手测
+
+发版时按 `VERIFY-checklist.md` 全表勾选；本条目仅验证流程工具可用。
+
+- [x] checklist 文件存在
+- [x] new-verify-entry 可写入（编码已修）
+- [x] verify.ps1 可跑 test + release
+
+### REVIEW
+
+- PLAN P2-3 → done  
+- 遗留：Windows PowerShell 5.1 写中文日志时脚本须 UTF-8 BOM  
+
+---
+
 ## 2026-07-17 · 0.6.1 工作台壳层 + 置顶 + 多屏 + 图标
 
 ### DEFINE/PLAN

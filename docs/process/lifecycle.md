@@ -97,8 +97,10 @@ cargo build --release
 
 ### 落盘（推荐）
 
-- 在提交说明或 `docs/product/VERIFY-log.md` 追加日期 + 结果
-- 失败则回到 BUILD 或修正 DEFINE
+- **基线手测清单**：`docs/product/VERIFY-checklist.md`（对齐 DEFINE §7）
+- **追加日志条目**：`pwsh -File scripts/new-verify-entry.ps1 [-Title "短说明"]`
+- **命令门禁**：`pwsh -File scripts/verify.ps1`（可选 `-StopRunning` 先结束占用中的 exe）
+- 结果写在 `docs/product/VERIFY-log.md`；失败则回到 BUILD 或修正 DEFINE
 
 ### 完成条件
 

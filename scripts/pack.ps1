@@ -12,10 +12,15 @@ $PkgDirName = "${Name}-v${Version}-win64"
 $DistRoot = Join-Path $Root "dist"
 $PkgDir = Join-Path $DistRoot $PkgDirName
 $ZipPath = Join-Path $DistRoot "${PkgDirName}.zip"
-$ExeSrc = Join-Path $Root "target\release\${Name}.exe"
+$ReleaseDir = Join-Path $Root "target\release"
 
 Write-Host "==> stop running instance (if any)"
-Get-Process -Name $Name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -ErrorAction SilentlyContinue |
+    Where-Object {
+        try { $_.Path -and $_.Path.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) }
+        catch { $false }
+    } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
 Write-Host "==> cargo test"
@@ -25,7 +30,11 @@ if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 Write-Host "==> cargo build --release"
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "release build failed" }
-if (-not (Test-Path $ExeSrc)) { throw "missing $ExeSrc" }
+$ExeItem = Get-ChildItem -LiteralPath $ReleaseDir -Filter "*.exe" -File |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if (-not $ExeItem) { throw "missing release .exe under $ReleaseDir" }
+$ExeSrc = $ExeItem.FullName
 
 Write-Host "==> assemble $PkgDir"
 if (Test-Path $DistRoot) {

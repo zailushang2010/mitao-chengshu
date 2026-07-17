@@ -27,7 +27,7 @@ DEFINE → PLAN → BUILD → VERIFY → REVIEW
 - 语言：用户沟通与提交说明优先中文完整句
 - 栈：Rust + egui + PotPlayer（Windows）
 - UI 手感：`.agents/skills/ui-emil-design` + `docs/design/ui-guidance.md`
-- 验证底线：`cargo test` + `cargo build --release`；涉及播放/平铺必须写清手测步骤
+- 验证底线：`powershell -File scripts/verify.ps1`（或等价 cargo test + release）；手测基线见 `docs/product/VERIFY-checklist.md`；发版日志 `scripts/new-verify-entry.ps1`
 - 配置：不写死用户盘符；`library_paths` 权威；legacy 字段勿复活路径
 
 ## 变更最小记录（BUILD 起）
