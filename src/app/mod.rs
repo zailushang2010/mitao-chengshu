@@ -4,6 +4,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Textur
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::MediaMode;
 use crate::session::{SessionHandle, SessionPhase};
 use crate::thumb::ThumbCache;
 use crate::tray::{TrayCommand, TrayService};
@@ -28,9 +29,14 @@ pub struct SuijiApp {
     user_hid_to_tray: bool,
     /// Transient success / info banner: (text, seconds left)
     toast: Option<(String, f32)>,
-    /// While playing, keep panel above PotPlayer (user can toggle; cleared on minimize)
+    /// While playing movies, keep panel above PotPlayer
     pin_while_playing: bool,
     window_was_minimized: bool,
+    /// In-app image slideshow
+    slide_index: usize,
+    slide_elapsed: f32,
+    slide_paused: bool,
+    slide_tex: Option<(PathBuf, TextureHandle)>,
 }
 
 impl SuijiApp {
@@ -80,6 +86,10 @@ impl SuijiApp {
             toast,
             pin_while_playing: true,
             window_was_minimized: false,
+            slide_index: 0,
+            slide_elapsed: 0.0,
+            slide_paused: false,
+            slide_tex: None,
         }
     }
 
@@ -91,11 +101,15 @@ impl SuijiApp {
         self.session.snapshot().phase == SessionPhase::Playing
     }
 
+    fn is_image_mode(&self) -> bool {
+        self.session.media_mode() == MediaMode::Image
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
         self.user_hid_to_tray = false;
         self.window_was_minimized = false;
-        // Cut through PotPlayer; re-pin if in play mode
-        if self.playing_now() && self.pin_while_playing {
+        // Pin only matters for movie + PotPlayer
+        if self.playing_now() && self.pin_while_playing && !self.is_image_mode() {
             crate::tray::force_show_and_pin();
         } else {
             crate::tray::force_show_main_window();
@@ -114,11 +128,16 @@ impl SuijiApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(400));
     }
 
-    /// Pin above players while Playing, but release on minimize so taskbar works.
+    /// Pin above players while Playing movies, but release on minimize so taskbar works.
     fn sync_play_pin_state(&mut self, ctx: &egui::Context, phase: SessionPhase) {
         let minimized = ctx.input(|i| i.viewport().minimized == Some(true));
 
-        if phase != SessionPhase::Playing || self.user_hid_to_tray || !self.pin_while_playing {
+        // Image slideshow is in-app — no sticky topmost needed
+        if self.is_image_mode()
+            || phase != SessionPhase::Playing
+            || self.user_hid_to_tray
+            || !self.pin_while_playing
+        {
             if self.last_phase == SessionPhase::Playing || !self.pin_while_playing {
                 crate::tray::set_main_window_topmost(false);
             }
@@ -204,23 +223,173 @@ impl SuijiApp {
 
     fn ensure_thumbs(&mut self, files: &[PathBuf], ctx: &egui::Context) {
         for f in files {
-            self.thumbs.request(f);
             let key = f.to_string_lossy().to_string();
             if self.textures.contains_key(&key) {
                 continue;
             }
+            // Images: load file itself as preview texture
+            if is_image_path(f) {
+                if let Some(tex) = load_texture(ctx, &key, f) {
+                    self.textures.insert(key, tex);
+                }
+                continue;
+            }
+            self.thumbs.request(f);
             if let Some(path) = self.thumbs.path_if_ready(f) {
                 if let Some(tex) = load_texture(ctx, &key, &path) {
                     self.textures.insert(key, tex);
                 }
             }
         }
-        // Drop textures for files no longer in session
         let live: std::collections::HashSet<String> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
         self.textures.retain(|k, _| live.contains(k));
+    }
+
+    fn tick_slideshow(&mut self, ctx: &egui::Context, dt: f32, paths: &[PathBuf], interval: f32) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.slide_index >= paths.len() {
+            self.slide_index = 0;
+        }
+        // Keyboard
+        let mut step: i32 = 0;
+        let mut stop = false;
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                stop = true;
+            }
+            if i.key_pressed(egui::Key::Space) {
+                self.slide_paused = !self.slide_paused;
+            }
+            if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::N) {
+                step = 1;
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::P) {
+                step = -1;
+            }
+        });
+        if stop {
+            self.session.stop();
+            self.slide_tex = None;
+            self.show_toast("已结束幻灯");
+            return;
+        }
+        if step != 0 {
+            let n = paths.len() as i32;
+            self.slide_index = ((self.slide_index as i32 + step).rem_euclid(n)) as usize;
+            self.slide_elapsed = 0.0;
+            self.slide_tex = None;
+        } else if !self.slide_paused {
+            self.slide_elapsed += dt;
+            if self.slide_elapsed >= interval {
+                self.slide_elapsed = 0.0;
+                self.slide_index = (self.slide_index + 1) % paths.len();
+                self.slide_tex = None;
+            }
+        }
+        // Load texture for current
+        let path = &paths[self.slide_index];
+        let need = self
+            .slide_tex
+            .as_ref()
+            .map(|(p, _)| p != path)
+            .unwrap_or(true);
+        if need {
+            let key = format!("slide:{}", path.display());
+            if let Some(tex) = load_texture(ctx, &key, path) {
+                self.slide_tex = Some((path.clone(), tex));
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    fn draw_slideshow_overlay(&mut self, ctx: &egui::Context, paths: &[PathBuf], interval: u8) {
+        let n = paths.len();
+        if n == 0 {
+            return;
+        }
+        if self.slide_index >= n {
+            self.slide_index = 0;
+        }
+        egui::Area::new(egui::Id::new("slideshow_overlay"))
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.allocate_ui_at_rect(screen, |ui| {
+                    ui.painter()
+                        .rect_filled(screen, 0.0, Color32::from_rgb(12, 12, 14));
+
+                    if let Some((_, tex)) = &self.slide_tex {
+                        let size = tex.size_vec2();
+                        let fit = (screen.width() / size.x)
+                            .min(screen.height() / size.y)
+                            .min(1.5);
+                        let draw = size * fit;
+                        let rect = egui::Rect::from_center_size(screen.center(), draw);
+                        ui.painter().image(
+                            tex.id(),
+                            rect,
+                            egui::Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(1.0, 1.0),
+                            ),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        ui.painter().text(
+                            screen.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "加载图片…",
+                            egui::FontId::proportional(18.0),
+                            Color32::from_gray(180),
+                        );
+                    }
+
+                    // HUD
+                    let hud = format!(
+                        "{}/{}  ·  {}s  ·  {}  ·  空格暂停  ←/→ 切换  Esc 结束",
+                        self.slide_index + 1,
+                        n,
+                        interval,
+                        if self.slide_paused {
+                            "已暂停"
+                        } else {
+                            "播放中"
+                        }
+                    );
+                    ui.painter().text(
+                        egui::pos2(screen.left() + 16.0, screen.bottom() - 28.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        hud,
+                        egui::FontId::proportional(14.0),
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+                    );
+
+                    // Click zones: left prev, right next, center pause
+                    let resp = ui.interact(screen, ui.id().with("slide_click"), Sense::click());
+                    if resp.clicked() {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let x = (pos.x - screen.left()) / screen.width();
+                            if x < 0.28 {
+                                self.slide_index = (self.slide_index + n - 1) % n;
+                                self.slide_elapsed = 0.0;
+                                self.slide_tex = None;
+                            } else if x > 0.72 {
+                                self.slide_index = (self.slide_index + 1) % n;
+                                self.slide_elapsed = 0.0;
+                                self.slide_tex = None;
+                            } else {
+                                self.slide_paused = !self.slide_paused;
+                            }
+                        }
+                    }
+                });
+            });
     }
 }
 
@@ -270,6 +439,29 @@ impl eframe::App for SuijiApp {
         }
 
         self.sync_play_pin_state(ctx, snap.phase);
+
+        // Image slideshow tick
+        let image_slideshow = snap.media_mode == MediaMode::Image
+            && snap.phase == SessionPhase::Playing
+            && !snap.current_files.is_empty();
+        if image_slideshow {
+            if self.last_phase != SessionPhase::Playing {
+                self.slide_index = 0;
+                self.slide_elapsed = 0.0;
+                self.slide_paused = false;
+                self.slide_tex = None;
+            }
+            self.tick_slideshow(
+                ctx,
+                dt,
+                &snap.current_files,
+                snap.slideshow_interval_secs as f32,
+            );
+        } else if self.last_phase == SessionPhase::Playing
+            && snap.media_mode == MediaMode::Image
+        {
+            self.slide_tex = None;
+        }
         self.last_phase = snap.phase;
 
         self.ensure_thumbs(&snap.current_files, ctx);
@@ -321,20 +513,53 @@ impl eframe::App for SuijiApp {
                             bottom: 6,
                         })
                         .show(ui, |ui| {
+                            // Mode switch
+                            ui.horizontal(|ui| {
+                                mode_chip(
+                                    ui,
+                                    "电影",
+                                    snap.media_mode == MediaMode::Movie,
+                                    || {
+                                        self.session.set_media_mode(MediaMode::Movie);
+                                        self.slide_tex = None;
+                                        self.fit_height_frames = 6;
+                                        self.show_toast("已切换到电影模式");
+                                    },
+                                );
+                                ui.add_space(6.0);
+                                mode_chip(
+                                    ui,
+                                    "图片",
+                                    snap.media_mode == MediaMode::Image,
+                                    || {
+                                        self.session.set_media_mode(MediaMode::Image);
+                                        self.slide_tex = None;
+                                        self.fit_height_frames = 6;
+                                        self.show_toast("已切换到图片模式 · 预览后开启幻灯");
+                                    },
+                                );
+                            });
+                            ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        RichText::new("随机片库 · PotPlayer")
-                                            .size(10.5)
-                                            .color(FAINT)
-                                            .extra_letter_spacing(1.5),
+                                        RichText::new(match snap.media_mode {
+                                            MediaMode::Movie => "随机片库 · PotPlayer",
+                                            MediaMode::Image => "随机图库 · 内置幻灯",
+                                        })
+                                        .size(10.5)
+                                        .color(FAINT)
+                                        .extra_letter_spacing(1.5),
                                     );
                                     ui.add_space(1.0);
                                     ui.label(
-                                        RichText::new("今日片单")
-                                            .size(28.0)
-                                            .color(INK)
-                                            .strong(),
+                                        RichText::new(match snap.media_mode {
+                                            MediaMode::Movie => "今日片单",
+                                            MediaMode::Image => "今日图集",
+                                        })
+                                        .size(28.0)
+                                        .color(INK)
+                                        .strong(),
                                     );
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -345,32 +570,36 @@ impl eframe::App for SuijiApp {
                                         }
                                         ui.add_space(4.0);
                                     }
-                                    // Pin while playing — hover explains
-                                    let pin_tip = if self.pin_while_playing {
-                                        "播放时置顶：开（点此关闭，便于把窗口让给播放器）"
-                                    } else {
-                                        "播放时置顶：关（点此开启，便于在电影上操作控制台）"
-                                    };
-                                    if icon_btn_toggle(
-                                        ui,
-                                        IconKind::Pin,
-                                        pin_tip,
-                                        self.pin_while_playing,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.pin_while_playing = !self.pin_while_playing;
-                                        if !self.pin_while_playing {
-                                            crate::tray::set_main_window_topmost(false);
-                                            self.show_toast("已关闭播放时置顶");
+                                    // Pin only for movie + PotPlayer
+                                    if snap.media_mode == MediaMode::Movie {
+                                        let pin_tip = if self.pin_while_playing {
+                                            "播放时置顶：开（点此关闭）"
                                         } else {
-                                            if self.playing_now() && !self.user_hid_to_tray {
-                                                crate::tray::force_show_and_pin();
+                                            "播放时置顶：关（点此开启）"
+                                        };
+                                        if icon_btn_toggle(
+                                            ui,
+                                            IconKind::Pin,
+                                            pin_tip,
+                                            self.pin_while_playing,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.pin_while_playing = !self.pin_while_playing;
+                                            if !self.pin_while_playing {
+                                                crate::tray::set_main_window_topmost(false);
+                                                self.show_toast("已关闭播放时置顶");
+                                            } else {
+                                                if self.playing_now() && !self.user_hid_to_tray {
+                                                    crate::tray::force_show_and_pin();
+                                                }
+                                                self.show_toast(
+                                                    "已开启播放时置顶（最小化时会自动取消）",
+                                                );
                                             }
-                                            self.show_toast("已开启播放时置顶（最小化时会自动取消）");
                                         }
+                                        ui.add_space(4.0);
                                     }
-                                    ui.add_space(4.0);
                                     if icon_btn(ui, IconKind::Rescan, "重新扫描片库").clicked() {
                                         self.session.rescan();
                                     }
@@ -730,10 +959,25 @@ impl eframe::App for SuijiApp {
                                 !snap.library_roots.is_empty() && snap.library_count > 0;
 
                             // Primary
+                            let is_img = snap.media_mode == MediaMode::Image;
                             let (primary, primary_ok) = if playing {
-                                ("关闭本轮", !busy)
+                                (
+                                    if is_img {
+                                        "关闭幻灯"
+                                    } else {
+                                        "关闭本轮"
+                                    },
+                                    !busy,
+                                )
                             } else if has_preview {
-                                ("开启播放", !busy && can_lib)
+                                (
+                                    if is_img {
+                                        "开启幻灯"
+                                    } else {
+                                        "开启播放"
+                                    },
+                                    !busy && can_lib,
+                                )
                             } else {
                                 ("随机预览", !busy && can_lib)
                             };
@@ -741,13 +985,26 @@ impl eframe::App for SuijiApp {
                             if primary_btn(ui, primary, primary_ok).clicked() {
                                 if playing {
                                     self.session.stop();
+                                    self.slide_tex = None;
                                 } else if has_preview {
                                     self.session.start();
-                                    self.show_toast("正在按预览片单开播…");
+                                    if is_img {
+                                        self.slide_index = 0;
+                                        self.slide_elapsed = 0.0;
+                                        self.slide_paused = false;
+                                        self.slide_tex = None;
+                                        self.show_toast("幻灯开始 · Esc 结束");
+                                    } else {
+                                        self.show_toast("正在按预览片单开播…");
+                                    }
                                 } else {
                                     self.session.roll_preview();
                                     self.fit_height_frames = 6;
-                                    self.show_toast("已生成预览，确认后点「开启播放」");
+                                    self.show_toast(if is_img {
+                                        "已生成图集预览，确认后点「开启幻灯」"
+                                    } else {
+                                        "已生成预览，确认后点「开启播放」"
+                                    });
                                 }
                             }
 
@@ -793,6 +1050,15 @@ impl eframe::App for SuijiApp {
         if self.show_settings {
             self.settings_modal(ctx);
         }
+
+        // Full-window slideshow on top of main UI when image mode is playing
+        if image_slideshow {
+            self.draw_slideshow_overlay(
+                ctx,
+                &snap.current_files,
+                snap.slideshow_interval_secs,
+            );
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -821,10 +1087,15 @@ impl SuijiApp {
                     .inner_margin(16.0),
             )
             .show(ctx, |ui| {
+                let mode = self.session.media_mode();
                 ui.label(
-                    RichText::new("片库目录（可添加多个，将合并扫描）")
-                        .size(13.0)
-                        .color(MUTED),
+                    RichText::new(format!(
+                        "{}库目录（可添加多个，将合并扫描）· 当前：{}",
+                        mode.label(),
+                        mode.label()
+                    ))
+                    .size(13.0)
+                    .color(MUTED),
                 );
                 ui.add_space(6.0);
 
@@ -965,9 +1236,36 @@ impl SuijiApp {
                     );
                 }
 
+                if mode == MediaMode::Image {
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("幻灯片间隔（秒）")
+                            .size(13.0)
+                            .color(MUTED),
+                    );
+                    ui.add_space(4.0);
+                    let iv = self.session.config_clone().slideshow_interval_secs;
+                    ui.horizontal(|ui| {
+                        if small_step_btn(ui, "−").clicked() {
+                            self.session
+                                .set_slideshow_interval(iv.saturating_sub(1).max(1));
+                        }
+                        ui.label(
+                            RichText::new(format!("{iv}"))
+                                .size(16.0)
+                                .color(INK)
+                                .strong(),
+                        );
+                        if small_step_btn(ui, "+").clicked() {
+                            self.session.set_slideshow_interval(iv.saturating_add(1).min(60));
+                        }
+                        ui.label(RichText::new("秒 / 张").size(12.5).color(FAINT));
+                    });
+                }
+
                 ui.add_space(14.0);
                 ui.label(
-                    RichText::new("PotPlayer 路径（可留空自动探测）")
+                    RichText::new("PotPlayer 路径（电影模式，可留空自动探测）")
                         .size(13.0)
                         .color(MUTED),
                 );
@@ -1070,6 +1368,35 @@ fn load_texture(ctx: &egui::Context, id: &str, path: &Path) -> Option<TextureHan
     let pixels = img.into_raw();
     let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
     Some(ctx.load_texture(id, color, egui::TextureOptions::LINEAR))
+}
+
+fn is_image_path(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "tif" | "tiff"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn mode_chip(ui: &mut egui::Ui, label: &str, active: bool, on_click: impl FnOnce()) {
+    let fill = if active { INK } else { BG };
+    let fg = if active { ON_INK } else { MUTED };
+    let stroke = if active {
+        Stroke::new(1.0, INK)
+    } else {
+        Stroke::new(1.0, LINE_STRONG)
+    };
+    let btn = egui::Button::new(RichText::new(label).size(13.0).color(fg))
+        .fill(fill)
+        .stroke(stroke)
+        .min_size(Vec2::new(72.0, 30.0));
+    if ui.add(btn).clicked() {
+        on_click();
+    }
 }
 
 fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {

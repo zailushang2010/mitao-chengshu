@@ -14,8 +14,20 @@ impl History {
         app_data_dir().join("history.json")
     }
 
+    pub fn path_for_images() -> PathBuf {
+        app_data_dir().join("history_images.json")
+    }
+
     pub fn load() -> Self {
         Self::load_from(&Self::path()).unwrap_or_default()
+    }
+
+    pub fn load_images() -> Self {
+        Self::load_from(&Self::path_for_images()).unwrap_or_default()
+    }
+
+    pub fn save_images(&self) -> Result<(), String> {
+        self.save_to(&Self::path_for_images())
     }
 
     pub fn load_from(path: &Path) -> Option<Self> {

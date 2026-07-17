@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::config::Config;
+use crate::config::{Config, MediaMode};
 use crate::history::History;
 use crate::library::Library;
 use crate::picker;
@@ -39,6 +39,8 @@ pub struct SessionSnapshot {
     pub library_root: String,
     pub library_roots: Vec<String>,
     pub last_errors: Vec<String>,
+    pub media_mode: MediaMode,
+    pub slideshow_interval_secs: u8,
 }
 
 impl Default for SessionSnapshot {
@@ -53,6 +55,8 @@ impl Default for SessionSnapshot {
             library_root: String::new(),
             library_roots: Vec::new(),
             last_errors: Vec::new(),
+            media_mode: MediaMode::Movie,
+            slideshow_interval_secs: 5,
         }
     }
 }
@@ -76,9 +80,11 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub fn new(config: Config) -> Self {
-        let history = History::load();
-        let roots = config.library_roots();
-        let library = scan_config_roots(&roots, &config.video_extensions);
+        let mode = config.media_mode;
+        let history = load_history(mode);
+        let roots = config.roots_for(mode);
+        let exts = config.extensions_for(mode).to_vec();
+        let library = scan_config_roots(&roots, &exts);
         let ui_count = config.default_count;
         let inner = Inner {
             config,
@@ -125,6 +131,7 @@ impl SessionHandle {
         } else {
             g.preview_files.clone()
         };
+        let mode = g.config.media_mode;
         SessionSnapshot {
             phase: g.phase,
             message: g.message.clone(),
@@ -132,10 +139,67 @@ impl SessionHandle {
             has_preview: !g.preview_files.is_empty(),
             items,
             library_count: g.library.len(),
-            library_root: g.config.library_label(),
-            library_roots: g.config.library_roots(),
+            library_root: g.config.library_label_for(mode),
+            library_roots: g.config.roots_for(mode),
             last_errors: g.last_errors.clone(),
+            media_mode: mode,
+            slideshow_interval_secs: g.config.slideshow_interval_secs,
         }
+    }
+
+    pub fn media_mode(&self) -> MediaMode {
+        self.inner.lock().unwrap().config.media_mode
+    }
+
+    pub fn set_media_mode(&self, mode: MediaMode) {
+        let pids = {
+            let mut g = self.inner.lock().unwrap();
+            if g.config.media_mode == mode {
+                return;
+            }
+            let pids: Vec<u32> = if g.phase == SessionPhase::Playing
+                || g.phase == SessionPhase::Starting
+            {
+                let p: Vec<u32> = g
+                    .items
+                    .iter()
+                    .map(|i| i.pid)
+                    .filter(|p| *p != 0)
+                    .collect();
+                g.items.clear();
+                g.phase = SessionPhase::Idle;
+                p
+            } else {
+                Vec::new()
+            };
+            g.config.media_mode = mode;
+            let _ = crate::config::save(&g.config);
+            g.preview_files.clear();
+            g.items.clear();
+            g.history = load_history(mode);
+            pids
+        };
+        if !pids.is_empty() {
+            potplayer::kill_pids(&pids);
+        }
+        let (roots, exts) = {
+            let g = self.inner.lock().unwrap();
+            (
+                g.config.roots_for(mode),
+                g.config.extensions_for(mode).to_vec(),
+            )
+        };
+        let lib = scan_config_roots(&roots, &exts);
+        let mut g = self.inner.lock().unwrap();
+        g.library = lib;
+        g.phase = SessionPhase::Idle;
+        g.message = idle_message(&g);
+    }
+
+    pub fn set_slideshow_interval(&self, secs: u8) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.slideshow_interval_secs = secs.clamp(1, 60);
+        let _ = crate::config::save(&g.config);
     }
 
     pub fn config_clone(&self) -> Config {
@@ -264,7 +328,8 @@ impl SessionHandle {
 
     pub fn add_library_path(&self, path: String) {
         let mut g = self.inner.lock().unwrap();
-        g.config.add_library_path(path);
+        let mode = g.config.media_mode;
+        g.config.add_path_for(mode, path);
         let _ = crate::config::save(&g.config);
         g.message = "索引中…".into();
         drop(g);
@@ -274,7 +339,8 @@ impl SessionHandle {
     /// Remove a library root. Returns the removed path for UI feedback.
     pub fn remove_library_path(&self, index: usize) -> Option<String> {
         let mut g = self.inner.lock().unwrap();
-        let removed = g.config.remove_library_path(index);
+        let mode = g.config.media_mode;
+        let removed = g.config.remove_path_for(mode, index);
         if removed.is_some() {
             let _ = crate::config::save(&g.config);
             g.message = "索引中…".into();
@@ -294,8 +360,9 @@ impl SessionHandle {
 
     pub fn rescan(&self) {
         let mut g = self.inner.lock().unwrap();
-        let roots = g.config.library_roots();
-        let exts = g.config.video_extensions.clone();
+        let mode = g.config.media_mode;
+        let roots = g.config.roots_for(mode);
+        let exts = g.config.extensions_for(mode).to_vec();
         g.message = "索引中…".into();
         drop(g);
 
@@ -355,7 +422,7 @@ impl SessionHandle {
         }
     }
 
-    /// Launch PotPlayer for the current preview slate only.
+    /// Launch current preview: movies → PotPlayer; images → in-app slideshow.
     pub fn start(&self) {
         let mut g = self.inner.lock().unwrap();
         if g.phase != SessionPhase::Idle {
@@ -365,6 +432,15 @@ impl SessionHandle {
             g.message = "请先「随机预览」生成片单".into();
             return;
         }
+        if g.config.media_mode == MediaMode::Image {
+            let n = g.preview_files.len();
+            g.phase = SessionPhase::Playing;
+            g.items.clear();
+            g.last_errors.clear();
+            g.message = format!("幻灯中 · {n} 张 · 空格暂停 · ←/→ 切换 · Esc 结束");
+            return;
+        }
+
         g.phase = SessionPhase::Starting;
         g.message = "正在开启播放…".into();
         g.last_errors.clear();
@@ -381,6 +457,20 @@ impl SessionHandle {
         if g.phase != SessionPhase::Playing {
             return;
         }
+        if g.config.media_mode == MediaMode::Image {
+            g.phase = SessionPhase::Idle;
+            g.items.clear();
+            if g.preview_files.is_empty() {
+                g.message = idle_message(&g);
+            } else {
+                g.message = format!(
+                    "已停止幻灯 · 预览仍保留 {} 张",
+                    g.preview_files.len()
+                );
+            }
+            return;
+        }
+
         g.phase = SessionPhase::Stopping;
         g.message = "正在关闭本轮…".into();
         let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
@@ -392,7 +482,6 @@ impl SessionHandle {
             potplayer::kill_pids(&pids);
             let mut g = handle.lock().unwrap();
             g.phase = SessionPhase::Idle;
-            // Keep preview so user can re-open the same slate if they want
             if g.preview_files.is_empty() {
                 g.message = idle_message(&g);
             } else {
@@ -448,22 +537,42 @@ impl SessionHandle {
     }
 }
 
+fn load_history(mode: MediaMode) -> History {
+    match mode {
+        MediaMode::Movie => History::load(),
+        MediaMode::Image => History::load_images(),
+    }
+}
+
+fn save_history(mode: MediaMode, history: &History) {
+    let _ = match mode {
+        MediaMode::Movie => history.save(),
+        MediaMode::Image => history.save_images(),
+    };
+}
+
 fn idle_message(g: &Inner) -> String {
+    let unit = match g.config.media_mode {
+        MediaMode::Movie => "部",
+        MediaMode::Image => "张",
+    };
     if g.library.is_empty() {
-        if g.config.library_roots().is_empty() {
-            "请先设置片库目录".into()
+        if g.config.roots_for(g.config.media_mode).is_empty() {
+            format!("请先设置{}库目录", g.config.media_mode.label())
         } else {
-            "片库中未找到视频".into()
+            format!("{}库中未找到文件", g.config.media_mode.label())
         }
     } else if g.preview_files.is_empty() {
         format!(
-            "就绪 · 已索引 {} 部 · 先「随机预览」",
-            g.library.len()
+            "就绪 · 已索引 {} {} · 先「随机预览」",
+            g.library.len(),
+            unit
         )
     } else {
         format!(
-            "预览就绪 · {} 部 · 可「开启播放」",
-            g.preview_files.len()
+            "预览就绪 · {} {} · 可「开启播放」",
+            g.preview_files.len(),
+            unit
         )
     }
 }
@@ -518,8 +627,9 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         let mut g = handle.lock().unwrap();
         let paths: Vec<PathBuf> = launched.iter().map(|i| i.path.clone()).collect();
         let hist_size = g.config.recent_history_size;
+        let mode = g.config.media_mode;
         g.history.push_many(&paths, hist_size);
-        let _ = g.history.save();
+        save_history(mode, &g.history);
         // Keep preview in sync with what actually launched
         g.preview_files = paths.clone();
         g.items = launched;

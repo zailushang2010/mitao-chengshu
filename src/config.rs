@@ -2,6 +2,27 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaMode {
+    #[default]
+    Movie,
+    Image,
+}
+
+impl MediaMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            MediaMode::Movie => "电影",
+            MediaMode::Image => "图片",
+        }
+    }
+}
+
+fn default_slideshow_interval() -> u8 {
+    5
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Legacy single path (kept for old configs / backward compatibility).
@@ -10,6 +31,11 @@ pub struct Config {
     /// One or more movie roots (recursive). Preferred field.
     #[serde(default)]
     pub library_paths: Vec<String>,
+    /// Image library roots (separate from movies).
+    #[serde(default)]
+    pub image_library_paths: Vec<String>,
+    #[serde(default)]
+    pub media_mode: MediaMode,
     pub default_count: usize,
     pub count_min: usize,
     pub count_max: usize,
@@ -18,11 +44,28 @@ pub struct Config {
     pub recent_history_size: usize,
     pub potplayer_path: String,
     pub video_extensions: Vec<String>,
+    #[serde(default = "default_image_extensions")]
+    pub image_extensions: Vec<String>,
+    /// Slideshow seconds per image (1–60).
+    #[serde(default = "default_slideshow_interval")]
+    pub slideshow_interval_secs: u8,
     pub close_session_on_exit: bool,
     /// If true, title-bar close (X) hides to tray instead of quitting.
-    /// Default false: X exits the app; use the tray icon button to hide intentionally.
     #[serde(default)]
     pub minimize_to_tray: bool,
+}
+
+fn default_image_extensions() -> Vec<String> {
+    vec![
+        ".jpg".into(),
+        ".jpeg".into(),
+        ".png".into(),
+        ".webp".into(),
+        ".bmp".into(),
+        ".gif".into(),
+        ".tif".into(),
+        ".tiff".into(),
+    ]
 }
 
 impl Default for Config {
@@ -30,8 +73,9 @@ impl Default for Config {
         Self {
             library_path: String::new(),
             library_paths: Vec::new(),
+            image_library_paths: Vec::new(),
+            media_mode: MediaMode::Movie,
             default_count: 6,
-            // Soft defaults; both limits are user-editable in settings.
             count_min: 1,
             count_max: 16,
             volume_percent: 28,
@@ -49,6 +93,8 @@ impl Default for Config {
                 ".flv".into(),
                 ".webm".into(),
             ],
+            image_extensions: default_image_extensions(),
+            slideshow_interval_secs: 5,
             close_session_on_exit: false,
             minimize_to_tray: false,
         }
@@ -60,22 +106,40 @@ impl Config {
         n.clamp(self.count_min, self.count_max)
     }
 
-    /// All configured roots after normalize (non-empty unique paths).
+    /// Movie roots (legacy name kept).
     pub fn library_roots(&self) -> Vec<String> {
-        self.library_paths
-            .iter()
+        self.roots_for(MediaMode::Movie)
+    }
+
+    pub fn roots_for(&self, mode: MediaMode) -> Vec<String> {
+        let list = match mode {
+            MediaMode::Movie => &self.library_paths,
+            MediaMode::Image => &self.image_library_paths,
+        };
+        list.iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect()
     }
 
-    pub fn has_library(&self) -> bool {
-        !self.library_roots().is_empty()
+    pub fn extensions_for(&self, mode: MediaMode) -> &[String] {
+        match mode {
+            MediaMode::Movie => &self.video_extensions,
+            MediaMode::Image => &self.image_extensions,
+        }
     }
 
-    /// Short label for UI header.
+    pub fn has_library(&self) -> bool {
+        !self.roots_for(self.media_mode).is_empty()
+    }
+
+    /// Short label for UI header (current media mode).
     pub fn library_label(&self) -> String {
-        let roots = self.library_roots();
+        self.library_label_for(self.media_mode)
+    }
+
+    pub fn library_label_for(&self, mode: MediaMode) -> String {
+        let roots = self.roots_for(mode);
         match roots.len() {
             0 => String::new(),
             1 => roots[0].clone(),
@@ -111,79 +175,90 @@ impl Config {
         }
         self.default_count = self.default_count.clamp(self.count_min, self.count_max);
         self.volume_percent = self.volume_percent.min(100);
-        for ext in &mut self.video_extensions {
-            let lower = ext.to_ascii_lowercase();
-            *ext = if lower.starts_with('.') {
-                lower
-            } else {
-                format!(".{lower}")
-            };
-        }
+        normalize_ext_list(&mut self.video_extensions);
+        normalize_ext_list(&mut self.image_extensions);
+        self.slideshow_interval_secs = self.slideshow_interval_secs.clamp(1, 60);
 
         // library_paths is authoritative. Only migrate legacy library_path when
         // library_paths is empty (old configs). Never re-insert a removed path.
-        let mut paths: Vec<String> = self
-            .library_paths
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if paths.is_empty() {
+        self.library_paths = dedupe_paths(std::mem::take(&mut self.library_paths), true);
+        if self.library_paths.is_empty() {
             let legacy = self.library_path.trim().to_string();
             if !legacy.is_empty() {
-                paths.push(legacy);
+                self.library_paths.push(legacy);
+                self.library_paths = dedupe_paths(std::mem::take(&mut self.library_paths), false);
             }
         }
-        // Dedupe (Windows: case-insensitive)
-        let mut seen = std::collections::HashSet::new();
-        paths.retain(|p| seen.insert(path_key(p)));
-        self.library_paths = paths;
-        // Mirror first root for legacy field
         self.library_path = self
             .library_paths
             .first()
             .cloned()
             .unwrap_or_default();
+
+        self.image_library_paths =
+            dedupe_paths(std::mem::take(&mut self.image_library_paths), false);
         self
     }
 
     pub fn add_library_path(&mut self, path: String) {
+        self.add_path_for(self.media_mode, path);
+    }
+
+    pub fn add_path_for(&mut self, mode: MediaMode, path: String) {
         let path = path.trim().to_string();
         if path.is_empty() {
             return;
         }
-        if self
-            .library_paths
-            .iter()
-            .any(|p| path_key(p) == path_key(&path))
-        {
+        let list = match mode {
+            MediaMode::Movie => &mut self.library_paths,
+            MediaMode::Image => &mut self.image_library_paths,
+        };
+        if list.iter().any(|p| path_key(p) == path_key(&path)) {
             return;
         }
-        self.library_paths.push(path);
-        // Keep library_path in sync without re-merge surprises
-        self.library_path = self
-            .library_paths
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        list.push(path);
         *self = self.clone().normalize();
     }
 
     /// Returns the removed path when successful.
     pub fn remove_library_path(&mut self, index: usize) -> Option<String> {
-        if index >= self.library_paths.len() {
+        self.remove_path_for(self.media_mode, index)
+    }
+
+    pub fn remove_path_for(&mut self, mode: MediaMode, index: usize) -> Option<String> {
+        let list = match mode {
+            MediaMode::Movie => &mut self.library_paths,
+            MediaMode::Image => &mut self.image_library_paths,
+        };
+        if index >= list.len() {
             return None;
         }
-        let removed = self.library_paths.remove(index);
-        // Clear legacy field first so normalize cannot resurrect the removed path
-        self.library_path = self
-            .library_paths
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let removed = list.remove(index);
         *self = self.clone().normalize();
         Some(removed)
     }
+}
+
+fn normalize_ext_list(exts: &mut Vec<String>) {
+    for ext in exts {
+        let lower = ext.to_ascii_lowercase();
+        *ext = if lower.starts_with('.') {
+            lower
+        } else {
+            format!(".{lower}")
+        };
+    }
+}
+
+fn dedupe_paths(mut paths: Vec<String>, _movie: bool) -> Vec<String> {
+    paths = paths
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(path_key(p)));
+    paths
 }
 
 fn path_key(p: &str) -> String {
