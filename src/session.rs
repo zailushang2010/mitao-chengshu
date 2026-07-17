@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -107,6 +107,8 @@ struct Inner {
     ui_count: usize,
     /// Live counter while a background scan runs for any mode.
     scan_found: Arc<AtomicUsize>,
+    /// Cooperative cancel for in-flight library scan.
+    scan_cancel: Arc<AtomicBool>,
     /// Geometry guard running: force cell size for whole Playing session.
     geometry_guard: bool,
     /// Assigned grid cell per PID (source of truth for enforcement).
@@ -153,6 +155,9 @@ impl Inner {
         match mode {
             MediaMode::Movie => self.movie_scan_busy = busy,
             MediaMode::Image => self.image_scan_busy = busy,
+        }
+        if !busy {
+            // leave scan_cancel as-is; next begin_scan clears it
         }
     }
 
@@ -238,6 +243,7 @@ impl SessionHandle {
             last_errors: Vec::new(),
             ui_count,
             scan_found: Arc::new(AtomicUsize::new(0)),
+            scan_cancel: Arc::new(AtomicBool::new(false)),
             geometry_guard: false,
             tile_targets: std::collections::HashMap::new(),
         };
@@ -423,9 +429,13 @@ impl SessionHandle {
         }
     }
 
-    /// Background scan for a media mode; results fill that mode's cache.
+    /// Background scan for a media mode. `force` skips disk index cache.
     fn begin_scan(&self, mode: MediaMode) {
-        let (roots, exts, epoch, progress) = {
+        self.begin_scan_ex(mode, false);
+    }
+
+    fn begin_scan_ex(&self, mode: MediaMode, force: bool) {
+        let (roots, exts, epoch, progress, cancel) = {
             let mut g = self.inner.lock().unwrap();
             let roots = g.config.roots_for(mode);
             let exts = g.config.extensions_for(mode).to_vec();
@@ -439,36 +449,122 @@ impl SessionHandle {
             let epoch = g.bump_scan_epoch(mode);
             g.set_scan_busy(mode, true);
             g.scan_found.store(0, Ordering::Relaxed);
+            g.scan_cancel.store(false, Ordering::Relaxed);
             let progress = g.scan_found.clone();
+            let cancel = g.scan_cancel.clone();
             if g.config.media_mode == mode {
-                g.message = "索引中…".into();
+                g.message = if force {
+                    "强制扫描中…".into()
+                } else {
+                    "索引中…".into()
+                };
             }
-            (roots, exts, epoch, progress)
+            (roots, exts, epoch, progress, cancel)
         };
 
         let handle = self.inner.clone();
         thread::spawn(move || {
-            let paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+            let is_cancelled = || cancel.load(Ordering::Relaxed);
+            let mut all_files: Vec<PathBuf> = Vec::new();
+            let mut root_paths: Vec<PathBuf> = Vec::new();
             let handle_msg = handle.clone();
-            let lib = Library::scan_many_with_progress(&paths, &exts, |n| {
-                progress.store(n, Ordering::Relaxed);
-                if n == 1 || n % 40 == 0 {
-                    if let Ok(mut g) = handle_msg.try_lock() {
-                        if g.config.media_mode == mode && g.is_scan_busy(mode) {
-                            g.message = format!("索引中… 已发现 {n} 个");
+
+            for root_s in &roots {
+                if is_cancelled() {
+                    break;
+                }
+                let root = PathBuf::from(root_s);
+                root_paths.push(root.clone());
+                if !force {
+                    if let Some(cached) = crate::index_cache::load_root(&root, &exts) {
+                        let base = all_files.len();
+                        all_files.extend(cached);
+                        progress.store(all_files.len(), Ordering::Relaxed);
+                        if let Ok(mut g) = handle_msg.try_lock() {
+                            if g.config.media_mode == mode && g.is_scan_busy(mode) {
+                                g.message = format!(
+                                    "索引中… 缓存 {} 个（合计 {}）",
+                                    all_files.len() - base,
+                                    all_files.len()
+                                );
+                            }
                         }
+                        continue;
                     }
                 }
-            });
+                let start = all_files.len();
+                let mut on_found = |n: usize| {
+                    progress.store(n, Ordering::Relaxed);
+                    if n == 1 || n % 40 == 0 {
+                        if let Ok(mut g) = handle_msg.try_lock() {
+                            if g.config.media_mode == mode && g.is_scan_busy(mode) {
+                                g.message = format!("索引中… 已发现 {n} 个");
+                            }
+                        }
+                    }
+                };
+                match Library::scan_one_cancellable(
+                    &root,
+                    &exts,
+                    &mut on_found,
+                    &is_cancelled,
+                    start,
+                ) {
+                    Some(files) => {
+                        if !is_cancelled() {
+                            crate::index_cache::save_root(&root, &exts, &files);
+                        }
+                        all_files.extend(files);
+                        progress.store(all_files.len(), Ordering::Relaxed);
+                    }
+                    None => break,
+                }
+            }
+
             let mut g = handle.lock().unwrap();
             if g.scan_epoch(mode) != epoch {
-                return; // superseded by a newer scan for this mode
+                return;
             }
+            if is_cancelled() {
+                g.set_scan_busy(mode, false);
+                // Keep previous library if any
+                if g.config.media_mode == mode {
+                    g.message = if g.is_indexed(mode) {
+                        format!("索引已取消 · 仍用上次 {} 个", g.library().len())
+                    } else {
+                        "索引已取消".into()
+                    };
+                }
+                return;
+            }
+            all_files.sort();
+            all_files.dedup();
+            let lib = Library {
+                roots: root_paths,
+                files: all_files,
+            };
             g.set_library(mode, lib);
             if g.config.media_mode == mode && g.phase == SessionPhase::Idle {
                 g.message = idle_message(&g);
             }
         });
+    }
+
+    /// Cancel in-flight index for the active media mode.
+    pub fn cancel_scan(&self) {
+        let mut g = self.inner.lock().unwrap();
+        let mode = g.config.media_mode;
+        if !g.is_scan_busy(mode) {
+            return;
+        }
+        g.scan_cancel.store(true, Ordering::Relaxed);
+        g.bump_scan_epoch(mode); // supersede worker result
+        g.set_scan_busy(mode, false);
+        g.message = if g.is_indexed(mode) {
+            format!("索引已取消 · 仍用上次 {} 个", g.library().len())
+        } else {
+            "索引已取消".into()
+        };
     }
 
     /// Drop dead PotPlayer PIDs from active items and parked background.
@@ -672,8 +768,10 @@ impl SessionHandle {
         let mode = {
             let mut g = self.inner.lock().unwrap();
             let mode = g.config.media_mode;
-            g.config.add_path_for(mode, path);
+            let exts = g.config.extensions_for(mode).to_vec();
+            g.config.add_path_for(mode, path.clone());
             g.invalidate_mode(mode);
+            crate::index_cache::invalidate_root(&path, &exts);
             g.message = "索引中…".into();
             let cfg = g.config.clone();
             drop(g);
@@ -682,7 +780,7 @@ impl SessionHandle {
             });
             mode
         };
-        self.begin_scan(mode);
+        self.begin_scan_ex(mode, true);
     }
 
     /// Remove a library root. Returns the removed path for UI feedback.
@@ -691,7 +789,9 @@ impl SessionHandle {
             let mut g = self.inner.lock().unwrap();
             let mode = g.config.media_mode;
             let removed = g.config.remove_path_for(mode, index);
-            if removed.is_some() {
+            if let Some(ref p) = removed {
+                let exts = g.config.extensions_for(mode).to_vec();
+                crate::index_cache::invalidate_root(p, &exts);
                 g.invalidate_mode(mode);
                 g.message = "索引中…".into();
                 let cfg = g.config.clone();
@@ -702,7 +802,7 @@ impl SessionHandle {
             (removed, mode)
         };
         if removed.is_some() {
-            self.begin_scan(mode);
+            self.begin_scan_ex(mode, true);
         }
         removed
     }
@@ -717,11 +817,12 @@ impl SessionHandle {
         let mode = {
             let mut g = self.inner.lock().unwrap();
             let mode = g.config.media_mode;
-            // Keep old cache visible until new scan lands; just mark busy.
-            g.message = "索引中…".into();
+            // Force full disk walk; invalidate memory index for this mode
+            g.invalidate_mode(mode);
+            g.message = "强制扫描中…".into();
             mode
         };
-        self.begin_scan(mode);
+        self.begin_scan_ex(mode, true);
     }
 
     /// Randomly pick a slate into preview only — does not launch PotPlayer.

@@ -4,8 +4,8 @@ use eframe::egui::{self, Color32, Layout, RichText, Sense, Stroke, Vec2};
 use crate::config::{ImagePlayStyle, MediaMode};
 use super::theme::{BG, BG_SOFT, FAINT, INK, LINE, LINE_STRONG, MUTED};
 use super::widgets::{
-    bound_stepper, ease_out_cubic, mini_text_btn, primary_btn, sized_outline_button, small_step_btn,
-    toggle, truncate_path,
+    bound_stepper, ease_out_cubic, mini_text_btn, mode_chip, primary_btn, sized_outline_button,
+    small_step_btn, toggle, truncate_path,
 };
 use super::SuijiApp;
 

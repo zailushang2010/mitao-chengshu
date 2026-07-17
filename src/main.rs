@@ -4,6 +4,7 @@ mod app;
 mod brand;
 mod config;
 mod history;
+mod index_cache;
 mod library;
 mod picker;
 mod potplayer;

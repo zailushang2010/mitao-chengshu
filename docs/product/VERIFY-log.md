@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-07-17 · P1-4 索引缓存 + 取消
+
+### DEFINE/PLAN
+
+- `docs/product/changes/2026-07-17-index-cache-cancel-DEFINE-PLAN.md`
+
+### 命令
+
+- [x] cargo test — 20 passed / 1 ignored（含 index_cache 单测）
+- [x] cargo build --release — Finished
+
+### 手测
+
+- [ ] 大库第二次启动应明显快（读 index_cache）
+- [ ] 索引中点「取消索引」
+- [ ] 重新扫描强制全量并刷新缓存
+
+### REVIEW
+
+- PLAN P1-4 → done  
+
+---
+
 ## 2026-07-17 · P1-3 拆分 app/mod.rs
 
 ### DEFINE

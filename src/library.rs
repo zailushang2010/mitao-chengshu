@@ -29,6 +29,17 @@ impl Library {
         extensions: &[String],
         mut on_found: impl FnMut(usize),
     ) -> Self {
+        Self::scan_many_cancellable(roots, extensions, &mut on_found, &|| false)
+            .unwrap_or_else(Self::empty)
+    }
+
+    /// Full scan with progress + cancel. Returns `None` if cancelled mid-way.
+    pub fn scan_many_cancellable(
+        roots: &[PathBuf],
+        extensions: &[String],
+        on_found: &mut impl FnMut(usize),
+        is_cancelled: &impl Fn() -> bool,
+    ) -> Option<Self> {
         let roots: Vec<PathBuf> = roots
             .iter()
             .filter(|r| !r.as_os_str().is_empty())
@@ -36,7 +47,7 @@ impl Library {
             .collect();
 
         if roots.is_empty() {
-            return Self::empty();
+            return Some(Self::empty());
         }
 
         let ext_set: BTreeSet<String> = extensions
@@ -46,16 +57,52 @@ impl Library {
 
         let mut files = Vec::new();
         for root in &roots {
+            if is_cancelled() {
+                return None;
+            }
             if !root.is_dir() {
                 continue;
             }
-            collect_under(root, &ext_set, &mut files, &mut on_found);
+            if !collect_under(root, &ext_set, &mut files, on_found, is_cancelled) {
+                return None;
+            }
         }
 
         files.sort();
         files.dedup();
 
-        Self { roots, files }
+        Some(Self { roots, files })
+    }
+
+    /// Scan one root only (for per-root disk cache fill).
+    pub fn scan_one_cancellable(
+        root: &Path,
+        extensions: &[String],
+        on_found: &mut impl FnMut(usize),
+        is_cancelled: &impl Fn() -> bool,
+        start_count: usize,
+    ) -> Option<Vec<PathBuf>> {
+        if is_cancelled() {
+            return None;
+        }
+        if !root.is_dir() {
+            return Some(Vec::new());
+        }
+        let ext_set: BTreeSet<String> = extensions
+            .iter()
+            .map(|e| e.to_ascii_lowercase())
+            .collect();
+        let mut local = Vec::new();
+        if !collect_under(
+            root,
+            &ext_set,
+            &mut local,
+            &mut |n| on_found(start_count + n),
+            is_cancelled,
+        ) {
+            return None;
+        }
+        Some(local)
     }
 
     pub fn len(&self) -> usize {
@@ -67,19 +114,27 @@ impl Library {
     }
 }
 
+/// Returns false if cancelled.
 fn collect_under(
     root: &Path,
     ext_set: &BTreeSet<String>,
     files: &mut Vec<PathBuf>,
     on_found: &mut impl FnMut(usize),
-) {
+    is_cancelled: &impl Fn() -> bool,
+) -> bool {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if is_cancelled() {
+            return false;
+        }
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
         for entry in entries.flatten() {
+            if is_cancelled() {
+                return false;
+            }
             let path = entry.path();
             let file_type = match entry.file_type() {
                 Ok(t) => t,
@@ -103,6 +158,7 @@ fn collect_under(
             }
         }
     }
+    true
 }
 
 #[cfg(test)]

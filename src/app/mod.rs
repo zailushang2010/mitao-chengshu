@@ -659,6 +659,13 @@ impl eframe::App for SuijiApp {
                                 ui.label(
                                     RichText::new(lib_line).size(12.0).color(MUTED),
                                 );
+                                if snap.indexing {
+                                    ui.add_space(6.0);
+                                    if mini_text_btn(ui, "取消索引").clicked() {
+                                        self.session.cancel_scan();
+                                        self.show_toast("已取消索引");
+                                    }
+                                }
                             });
                         });
 
