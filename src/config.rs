@@ -270,14 +270,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_library_path_merges_into_paths() {
+    fn legacy_library_path_merges_when_paths_empty() {
+        let mut c = Config::default();
+        c.library_path = r"D:\Movies".into();
+        c.library_paths = vec![];
+        let c = c.normalize();
+        assert_eq!(c.library_roots(), vec![r"D:\Movies".to_string()]);
+    }
+
+    #[test]
+    fn library_paths_authoritative_over_legacy() {
         let mut c = Config::default();
         c.library_path = r"D:\Movies".into();
         c.library_paths = vec![r"E:\More".into()];
         let c = c.normalize();
-        assert_eq!(c.library_roots().len(), 2);
-        assert!(c.library_roots().iter().any(|p| p.contains("Movies")));
-        assert!(c.library_roots().iter().any(|p| p.contains("More")));
+        // When library_paths is non-empty, legacy field is not re-merged
+        assert_eq!(c.library_roots().len(), 1);
+        assert!(c.library_roots()[0].contains("More"));
+        assert_eq!(c.library_path, c.library_roots()[0]);
     }
 
     #[test]
