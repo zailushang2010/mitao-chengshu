@@ -203,7 +203,7 @@ impl SuijiApp {
                 }
                 TrayCommand::Reroll => {
                     self.session.reroll();
-                    self.show_toast("已换一桌预览");
+                    self.show_toast("已换一批预览");
                     self.show_window(ctx);
                 }
                 TrayCommand::StopSession => {
@@ -1130,19 +1130,19 @@ impl eframe::App for SuijiApp {
                             }
 
                             ui.add_space(6.0);
-                            // Single secondary: 换一桌 only (no duplicate 再预览)
+                            // Single secondary: 换一批 only (no duplicate 再预览)
                             let reroll_ok = !busy
                                 && can_lib
                                 && (playing || snap.phase == SessionPhase::Idle);
-                            if secondary_btn(ui, ui.available_width(), "换一桌", reroll_ok)
+                            if secondary_btn(ui, ui.available_width(), "换一批", reroll_ok)
                                 .clicked()
                             {
                                 self.session.reroll();
                                 self.fit_height_frames = 6;
                                 if playing {
-                                    self.show_toast("已停播并换一桌预览（未自动播放）");
+                                    self.show_toast("已停播并换一批预览（未自动播放）");
                                 } else {
-                                    self.show_toast("已换一桌预览");
+                                    self.show_toast("已换一批预览");
                                 }
                             }
                         });

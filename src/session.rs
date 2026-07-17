@@ -508,7 +508,7 @@ impl SessionHandle {
                 g.message = idle_message(&g);
             } else {
                 g.message = format!(
-                    "已停止 · 预览仍保留 {} 部，可再「开启播放」或「换一桌」",
+                    "已停止 · 预览仍保留 {} 部，可再「开启播放」或「换一批」",
                     g.preview_files.len()
                 );
             }
@@ -529,7 +529,7 @@ impl SessionHandle {
         // Playing → stop then preview
         let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
         g.phase = SessionPhase::Stopping;
-        g.message = "换一桌中…".into();
+        g.message = "换一批中…".into();
         g.items.clear();
         drop(g);
 
