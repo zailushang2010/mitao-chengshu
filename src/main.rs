@@ -13,27 +13,64 @@ mod tray;
 
 use eframe::egui;
 use session::SessionHandle;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::sync::Mutex;
+
+/// Window title used to find / focus an existing instance.
+const WINDOW_TITLE: &str = "suijiPotPlayer · 今日片单";
+const MUTEX_NAME: &str = "Local\\suijiPotPlayer_SingleInstance_v1";
 
 fn main() -> eframe::Result<()> {
-    // Simple single-instance via lock file next to exe
-    let lock_path = config::app_data_dir().join("suiji_potplayer.lock");
-    let _lock = match single_instance_lock(&lock_path) {
-        Ok(l) => l,
-        Err(_) => {
-            eprintln!("suijiPotPlayer 已在运行");
+    init_log();
+    log_line("starting");
+
+    // Named mutex: reliable single-instance (survives crash better than bare PID file)
+    let _mutex = match acquire_mutex() {
+        MutexAcquire::Ok(m) => m,
+        MutexAcquire::AlreadyRunning => {
+            log_line("already running — focusing existing window");
+            focus_existing_window();
+            message_box(
+                "suijiPotPlayer",
+                "程序已在运行。\n\n若看不到窗口，请查看任务栏或托盘区（右下角小图标）。\n已尝试把已有窗口带到前台。",
+            );
             return Ok(());
+        }
+        MutexAcquire::Error(e) => {
+            log_line(&format!("mutex error (continue anyway): {e}"));
+            None
         }
     };
 
-    let cfg = config::load_or_default();
+    // Clean stale lock file from older versions
+    let _ = std::fs::remove_file(config::app_data_dir().join("suiji_potplayer.lock"));
+
+    let mut cfg = config::load_or_default();
+    // Ensure demo / known library path if empty
+    if cfg.library_path.trim().is_empty() {
+        let demo = r"F:\电影";
+        if std::path::Path::new(demo).is_dir() {
+            cfg.library_path = demo.to_string();
+            let _ = config::save(&cfg);
+            log_line("set library_path to F:\\电影");
+        }
+    }
     if !config::config_path().exists() {
         let _ = config::save(&cfg);
     }
+    log_line(&format!(
+        "config library={:?} count={}",
+        cfg.library_path, cfg.default_count
+    ));
 
     let session = SessionHandle::new(cfg);
-    // Initial scan if path set
     if !session.snapshot().library_root.is_empty() {
         session.rescan();
+        log_line(&format!(
+            "indexed {} videos",
+            session.snapshot().library_count
+        ));
     }
 
     let viewport = egui::ViewportBuilder::default()
@@ -41,7 +78,9 @@ fn main() -> eframe::Result<()> {
         .with_min_inner_size([400.0, 560.0])
         .with_max_inner_size([480.0, 720.0])
         .with_resizable(true)
-        .with_title("suijiPotPlayer · 今日片单");
+        .with_visible(true)
+        .with_active(true)
+        .with_title(WINDOW_TITLE);
 
     let native_options = eframe::NativeOptions {
         viewport,
@@ -49,66 +88,141 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "suijiPotPlayer",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::SuijiApp::new(cc, session)))),
-    )
+        Box::new(|cc| {
+            log_line("eframe created");
+            Ok(Box::new(app::SuijiApp::new(cc, session)))
+        }),
+    );
+
+    // Keep mutex alive until process end
+    drop(_mutex);
+
+    if let Err(ref e) = result {
+        let msg = format!("启动失败：{e}\n\n详细日志：同目录 startup.log");
+        log_line(&msg);
+        message_box("suijiPotPlayer 启动失败", &msg);
+    }
+    result
 }
 
-struct LockFile {
-    path: std::path::PathBuf,
-    file: std::fs::File,
+enum MutexAcquire {
+    Ok(Option<MutexGuard>),
+    AlreadyRunning,
+    Error(String),
 }
 
-impl Drop for LockFile {
+/// Holds the Win32 mutex handle for process lifetime.
+struct MutexGuard {
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl Drop for MutexGuard {
     fn drop(&mut self) {
-        // Ensure file handle is released before removing the path.
-        let _ = self.file.sync_all();
-        let _ = std::fs::remove_file(&self.path);
+        unsafe {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::ReleaseMutex;
+            let _ = ReleaseMutex(self.handle);
+            let _ = CloseHandle(self.handle);
+        }
     }
 }
 
-fn single_instance_lock(path: &std::path::Path) -> Result<LockFile, ()> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
+fn acquire_mutex() -> MutexAcquire {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
 
-    if path.exists() {
-        // Stale lock: if we cannot write exclusive, assume running.
-        // On Windows, try create new and fail if exists — also check pid liveness loosely.
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(pid) = content.trim().parse::<u32>() {
-                if process_alive(pid) {
-                    return Err(());
+    let wide: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        match CreateMutexW(None, true, PCWSTR(wide.as_ptr())) {
+            Ok(handle) => {
+                let err = GetLastError();
+                if err == ERROR_ALREADY_EXISTS {
+                    let _ = windows::Win32::Foundation::CloseHandle(handle);
+                    MutexAcquire::AlreadyRunning
+                } else {
+                    MutexAcquire::Ok(Some(MutexGuard { handle }))
                 }
             }
+            Err(e) => MutexAcquire::Error(e.to_string()),
         }
-        let _ = std::fs::remove_file(path);
     }
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| ())?;
-    let _ = writeln!(file, "{}", std::process::id());
-    Ok(LockFile {
-        path: path.to_path_buf(),
-        file,
-    })
 }
 
-fn process_alive(pid: u32) -> bool {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+fn focus_existing_window() {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
 
+    let title: Vec<u16> = WINDOW_TITLE.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
-        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-            Ok(h) => {
-                let _ = CloseHandle(h);
-                true
-            }
-            Err(_) => false,
+        let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) else {
+            log_line("FindWindow: no window with title");
+            return;
+        };
+        if hwnd.0.is_null() {
+            log_line("FindWindow: null hwnd");
+            return;
+        }
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        log_line("focused existing window");
+    }
+}
+
+fn message_box(title: &str, body: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+
+    let t: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let b: Vec<u16> = body.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(b.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+fn init_log() {
+    let path = config::app_data_dir().join("startup.log");
+    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+        *LOG.lock().unwrap() = Some(f);
+    }
+}
+
+fn log_line(msg: &str) {
+    let line = format!(
+        "[{}] {}\n",
+        chrono_like_now(),
+        msg
+    );
+    if let Ok(mut g) = LOG.lock() {
+        if let Some(f) = g.as_mut() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.flush();
         }
     }
+    #[cfg(debug_assertions)]
+    eprint!("{line}");
+}
+
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
 }

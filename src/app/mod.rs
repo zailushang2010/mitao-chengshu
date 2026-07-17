@@ -18,11 +18,19 @@ pub struct SuijiApp {
     tray: Option<TrayService>,
     /// When true, next close request quits instead of tray-hide
     force_quit: bool,
+    /// First frames: force visible + focus so user always sees the window
+    boot_frames: u8,
 }
 
 impl SuijiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, session: SessionHandle) -> Self {
         theme::apply_magazine_style(&cc.egui_ctx);
+        // Always show on create
+        cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+
         let pot_path_edit = session.config_clone().potplayer_path;
         let tray = match TrayService::try_new() {
             Ok(t) => Some(t),
@@ -31,14 +39,20 @@ impl SuijiApp {
                 None
             }
         };
+        // Open settings on first run if library empty after scan
+        let show_settings = {
+            let s = session.snapshot();
+            s.library_root.is_empty() || s.library_count == 0
+        };
         Self {
             session,
-            show_settings: false,
+            show_settings,
             pot_path_edit,
             thumbs: ThumbCache::new(),
             textures: HashMap::new(),
             tray,
             force_quit: false,
+            boot_frames: 10,
         }
     }
 
@@ -103,6 +117,12 @@ impl SuijiApp {
 
 impl eframe::App for SuijiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.boot_frames > 0 {
+            self.boot_frames -= 1;
+            self.show_window(ctx);
+            ctx.request_repaint();
+        }
+
         self.poll_tray(ctx);
 
         // Close → tray (unless force quit or setting off)
