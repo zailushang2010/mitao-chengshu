@@ -20,6 +20,8 @@ pub struct SuijiApp {
     force_quit: bool,
     /// First frames: force visible + focus so user always sees the window
     boot_frames: u8,
+    /// Shrink window height to content for a few frames (kill bottom dead space)
+    fit_height_frames: u8,
 }
 
 impl SuijiApp {
@@ -53,6 +55,7 @@ impl SuijiApp {
             tray,
             force_quit: false,
             boot_frames: 10,
+            fit_height_frames: 8,
         }
     }
 
@@ -176,7 +179,8 @@ impl eframe::App for SuijiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG).inner_margin(0.0))
             .show(ctx, |ui| {
-                ui.set_min_size(ui.available_size());
+                // Do NOT expand to full window height — that creates dead space under footer.
+                let content_top = ui.cursor().top();
 
                 // ── Header: title + tool icons (always visible) ──
                 egui::Frame::NONE
@@ -185,8 +189,8 @@ impl eframe::App for SuijiApp {
                     .inner_margin(egui::Margin {
                         left: 20,
                         right: 16,
-                        top: 16,
-                        bottom: 10,
+                        top: 12,
+                        bottom: 8,
                     })
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -251,14 +255,9 @@ impl eframe::App for SuijiApp {
                         });
                     });
 
-                // ── Middle: shrink-to-content (no empty stretch before footer) ──
-                // Reserve only enough for footer so scroll appears when needed.
-                let footer_reserve = 104.0;
-                let mid_max = (ui.available_height() - footer_reserve).max(80.0);
-
+                // ── Middle: content-sized (no vertical stretch) ──
                 egui::ScrollArea::vertical()
-                    .max_height(mid_max)
-                    // Critical: allow vertical shrink so preview sits tight above buttons
+                    .max_height(420.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         // Controls
@@ -415,7 +414,7 @@ impl eframe::App for SuijiApp {
                         left: 20,
                         right: 20,
                         top: 8,
-                        bottom: 12,
+                        bottom: 10,
                     })
                     .show(ui, |ui| {
                         let busy = matches!(
@@ -437,7 +436,7 @@ impl eframe::App for SuijiApp {
                             }
                         }
 
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             let w = (ui.available_width() - 8.0) / 2.0;
                             let reroll_ok = !busy
@@ -453,6 +452,25 @@ impl eframe::App for SuijiApp {
                             }
                         });
                     });
+
+                // Fit window height to laid-out content (removes empty strip under buttons)
+                if self.fit_height_frames > 0 && !self.show_settings {
+                    let used_h = (ui.min_rect().bottom() - content_top).ceil().max(360.0);
+                    let outer_h = used_h + 2.0;
+                    // Keep width; only tighten height
+                    let w = ctx.input(|i| {
+                        i.viewport()
+                            .inner_rect
+                            .map(|r| r.width())
+                            .unwrap_or(440.0)
+                    });
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                        w.clamp(400.0, 520.0),
+                        outer_h.clamp(400.0, 900.0),
+                    )));
+                    self.fit_height_frames -= 1;
+                    ctx.request_repaint();
+                }
             });
 
         if self.show_settings {
