@@ -12,7 +12,10 @@ use theme::{BG, BG_SOFT, FAINT, INK, LINE, LINE_STRONG, MUTED, ON_INK};
 
 pub struct SuijiApp {
     session: SessionHandle,
+    /// Desired settings open state (true = opening/open, false = closing/closed).
     show_settings: bool,
+    /// 0..=1 visual progress for settings (asymmetric open/close).
+    settings_vis: f32,
     pot_path_edit: String,
     thumbs: ThumbCache,
     textures: HashMap<String, TextureHandle>,
@@ -53,6 +56,9 @@ struct ToastState {
 const TOAST_ENTER: f32 = 0.16;
 const TOAST_EXIT: f32 = 0.18;
 const SLIDE_CROSSFADE: f32 = 0.18;
+/// Settings panel: open slower than close (Emil asymmetric enter/exit).
+const SETTINGS_OPEN_SECS: f32 = 0.20;
+const SETTINGS_CLOSE_SECS: f32 = 0.12;
 
 impl SuijiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, session: SessionHandle) -> Self {
@@ -89,6 +95,7 @@ impl SuijiApp {
         Self {
             session,
             show_settings: need_library,
+            settings_vis: 0.0,
             pot_path_edit,
             thumbs: ThumbCache::new(),
             textures: HashMap::new(),
@@ -1266,7 +1273,19 @@ impl eframe::App for SuijiApp {
                 }
             });
 
+        // Settings open/close animation (ease-out open 200ms, faster close 120ms)
         if self.show_settings {
+            if self.settings_vis < 1.0 {
+                self.settings_vis =
+                    (self.settings_vis + dt / SETTINGS_OPEN_SECS).min(1.0);
+                ctx.request_repaint();
+            }
+        } else if self.settings_vis > 0.0 {
+            self.settings_vis =
+                (self.settings_vis - dt / SETTINGS_CLOSE_SECS).max(0.0);
+            ctx.request_repaint();
+        }
+        if self.settings_vis > 0.001 {
             self.settings_modal(ctx);
         }
 
@@ -1289,12 +1308,37 @@ impl eframe::App for SuijiApp {
 
 impl SuijiApp {
     fn settings_modal(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_settings;
+        let t = ease_out_cubic(self.settings_vis.clamp(0.0, 1.0));
+        let a = (t * 255.0) as u8;
+        let scrim_a = (t * 88.0) as u8;
+
+        // Dim scrim — click does not close (avoid accidental dismiss while choosing folders)
+        egui::Area::new(egui::Id::new("settings_scrim"))
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .order(egui::Order::Middle)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter().rect_filled(
+                    screen,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(28, 25, 23, scrim_a),
+                );
+                let _ = ui.interact(
+                    screen,
+                    ui.id().with("settings_scrim_block"),
+                    Sense::click(),
+                );
+            });
+
+        let mut open = true; // keep window alive during exit fade
         let mut finish_clicked = false;
+        // Slight rise on enter (spatial: from below → center)
+        let y_off = (1.0 - t) * 14.0;
         egui::Window::new("片库设置")
             .collapsible(false)
             .resizable(true)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, y_off])
             // Smaller than main shell so margins remain around the modal
             .default_size([440.0, 520.0])
             .min_size([400.0, 420.0])
@@ -1302,12 +1346,28 @@ impl SuijiApp {
             .open(&mut open)
             .frame(
                 egui::Frame::window(&ctx.style())
-                    .fill(BG)
-                    .stroke(Stroke::new(1.0, LINE_STRONG))
+                    .fill(Color32::from_rgba_unmultiplied(BG.r(), BG.g(), BG.b(), a))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(
+                            LINE_STRONG.r(),
+                            LINE_STRONG.g(),
+                            LINE_STRONG.b(),
+                            a,
+                        ),
+                    ))
                     .corner_radius(2.0)
-                    .inner_margin(16.0),
+                    .inner_margin(16.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 6],
+                        blur: 18,
+                        spread: 0,
+                        color: Color32::from_rgba_unmultiplied(0, 0, 0, (t * 40.0) as u8),
+                    }),
             )
             .show(ctx, |ui| {
+                // Soften content while fading (legibility at low alpha handled by frame)
+                ui.set_opacity(t.max(0.05));
                 let mode = self.session.media_mode();
                 ui.label(
                     RichText::new(format!(
@@ -1591,7 +1651,7 @@ impl SuijiApp {
             self.session.set_potplayer_path(path);
             let cfg = self.session.config_clone();
             let save_ok = crate::config::save(&cfg).is_ok();
-            open = false;
+            self.show_settings = false; // begin close anim
             self.fit_height_frames = 4;
             if save_ok {
                 let roots = cfg.roots_for(cfg.media_mode).len();
@@ -1606,11 +1666,11 @@ impl SuijiApp {
             } else {
                 self.show_toast("设置未能写入文件，请检查目录权限");
             }
-        } else if self.show_settings && !open {
+        } else if !open && self.show_settings {
             // Closed via window X — changes were already live-saved
+            self.show_settings = false;
             self.show_toast("已关闭设置（修改已即时生效）");
         }
-        self.show_settings = open;
     }
 }
 
