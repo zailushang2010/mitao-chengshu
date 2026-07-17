@@ -87,7 +87,7 @@ impl SessionHandle {
         let roots = config.roots_for(mode);
         let exts = config.extensions_for(mode).to_vec();
         let library = scan_config_roots(&roots, &exts);
-        let ui_count = config.default_count;
+        let ui_count = config.default_count_for(mode);
         let inner = Inner {
             config,
             library,
@@ -176,6 +176,8 @@ impl SessionHandle {
                 Vec::new()
             };
             g.config.media_mode = mode;
+            // Each mode remembers its own pick count.
+            g.ui_count = g.config.default_count_for(mode);
             let _ = crate::config::save(&g.config);
             g.preview_files.clear();
             g.items.clear();
@@ -221,17 +223,21 @@ impl SessionHandle {
 
     pub fn set_ui_count(&self, n: usize) {
         let mut g = self.inner.lock().unwrap();
-        g.ui_count = g.config.clamp_count(n);
-        g.config.default_count = g.ui_count;
+        let mode = g.config.media_mode;
+        let n = g.config.clamp_count_for(mode, n);
+        g.ui_count = n;
+        g.config.set_default_count_for(mode, n);
         let _ = crate::config::save(&g.config);
     }
 
     pub fn set_count_bounds(&self, min: usize, max: usize) {
         let mut g = self.inner.lock().unwrap();
-        g.config.set_count_min(min);
-        g.config.set_count_max(max);
-        g.ui_count = g.config.clamp_count(g.ui_count);
-        g.config.default_count = g.ui_count;
+        let mode = g.config.media_mode;
+        g.config.set_count_min_for(mode, min);
+        g.config.set_count_max_for(mode, max);
+        let n = g.config.clamp_count_for(mode, g.ui_count);
+        g.ui_count = n;
+        g.config.set_default_count_for(mode, n);
         let _ = crate::config::save(&g.config);
     }
 
@@ -394,7 +400,7 @@ impl SessionHandle {
             g.message = "片库为空，无法预览".into();
             return;
         }
-        let n = g.config.clamp_count(g.ui_count);
+        let n = g.config.clamp_count_for(g.config.media_mode, g.ui_count);
         let chosen = picker::pick(
             &g.library.files,
             n,

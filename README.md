@@ -57,7 +57,8 @@ cargo build --release
 | `media_mode` | `movie` / `image` |
 | `library_paths` | 电影目录 |
 | `image_library_paths` | 图片目录 |
-| `default_count` / `count_min` / `count_max` | 数量 |
+| `default_count` / `count_min` / `count_max` | 电影本轮数量（与图片独立） |
+| `image_default_count` / `image_count_min` / `image_count_max` | 图片本轮数量 |
 | `image_play_style` | `slideshow` / `wall` |
 | `slideshow_interval_secs` | 幻灯间隔 1–60 |
 | `avoid_recent` | 避开最近 |

@@ -762,10 +762,11 @@ impl eframe::App for SuijiApp {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 5.0;
                             ui.horizontal(|ui| {
+                                let (cmin, cmax) = cfg.count_bounds_for(snap.media_mode);
                                 ui.label(
                                     RichText::new(format!(
                                         "本轮数量（{}–{}）",
-                                        cfg.count_min, cfg.count_max
+                                        cmin, cmax
                                     ))
                                     .size(13.0)
                                     .color(MUTED),
@@ -1306,50 +1307,48 @@ impl SuijiApp {
 
                 ui.add_space(12.0);
                 ui.label(
-                    RichText::new("本轮数量范围（可改，不再固定 5–10）")
-                        .size(13.0)
-                        .color(MUTED),
+                    RichText::new(match mode {
+                        MediaMode::Movie => "电影 · 本轮数量范围",
+                        MediaMode::Image => "图片 · 本轮数量范围",
+                    })
+                    .size(13.0)
+                    .color(MUTED),
                 );
                 ui.add_space(6.0);
                 {
                     let cfg_now = self.session.config_clone();
+                    let (cmin, cmax) = cfg_now.count_bounds_for(mode);
                     // Two equal columns so 下限 / 上限 stay on one level row
                     ui.columns(2, |cols| {
                         bound_stepper(
                             &mut cols[0],
                             "下限",
-                            cfg_now.count_min,
-                            || {
-                                self.session.set_count_bounds(
-                                    cfg_now.count_min.saturating_sub(1),
-                                    cfg_now.count_max,
-                                );
-                            },
+                            cmin,
                             || {
                                 self.session
-                                    .set_count_bounds(cfg_now.count_min + 1, cfg_now.count_max);
+                                    .set_count_bounds(cmin.saturating_sub(1), cmax);
+                            },
+                            || {
+                                self.session.set_count_bounds(cmin + 1, cmax);
                             },
                         );
                         bound_stepper(
                             &mut cols[1],
                             "上限",
-                            cfg_now.count_max,
-                            || {
-                                self.session.set_count_bounds(
-                                    cfg_now.count_min,
-                                    cfg_now.count_max.saturating_sub(1),
-                                );
-                            },
+                            cmax,
                             || {
                                 self.session
-                                    .set_count_bounds(cfg_now.count_min, cfg_now.count_max + 1);
+                                    .set_count_bounds(cmin, cmax.saturating_sub(1));
+                            },
+                            || {
+                                self.session.set_count_bounds(cmin, cmax + 1);
                             },
                         );
                     });
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!(
-                            "绝对范围 {}–{}；改后主界面「本轮数量」按此限制",
+                            "与另一模式独立记忆；绝对范围 {}–{}",
                             crate::config::Config::ABS_COUNT_MIN,
                             crate::config::Config::ABS_COUNT_MAX
                         ))
@@ -1497,10 +1496,14 @@ impl SuijiApp {
             open = false;
             self.fit_height_frames = 4;
             if save_ok {
-                let roots = cfg.library_roots().len();
+                let roots = cfg.roots_for(cfg.media_mode).len();
+                let (cmin, cmax) = cfg.count_bounds_for(cfg.media_mode);
+                let kind = match cfg.media_mode {
+                    MediaMode::Movie => "电影库",
+                    MediaMode::Image => "图库",
+                };
                 self.show_toast(format!(
-                    "设置已保存 · {} 个片库 · 数量 {}–{}",
-                    roots, cfg.count_min, cfg.count_max
+                    "设置已保存 · {kind} {roots} 个 · 本模式数量 {cmin}–{cmax}"
                 ));
             } else {
                 self.show_toast("设置未能写入文件，请检查目录权限");

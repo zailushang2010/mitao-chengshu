@@ -23,6 +23,16 @@ fn default_slideshow_interval() -> u8 {
     5
 }
 
+fn default_image_default_count() -> usize {
+    9
+}
+fn default_image_count_min() -> usize {
+    1
+}
+fn default_image_count_max() -> usize {
+    24
+}
+
 /// How images open after 开启幻灯/开启.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -56,9 +66,17 @@ pub struct Config {
     pub image_library_paths: Vec<String>,
     #[serde(default)]
     pub media_mode: MediaMode,
+    /// Movie: how many to pick per round (legacy field names kept).
     pub default_count: usize,
     pub count_min: usize,
     pub count_max: usize,
+    /// Image: separate pick count — not shared with movies.
+    #[serde(default = "default_image_default_count")]
+    pub image_default_count: usize,
+    #[serde(default = "default_image_count_min")]
+    pub image_count_min: usize,
+    #[serde(default = "default_image_count_max")]
+    pub image_count_max: usize,
     pub volume_percent: u8,
     pub avoid_recent: bool,
     pub recent_history_size: usize,
@@ -101,6 +119,9 @@ impl Default for Config {
             default_count: 6,
             count_min: 1,
             count_max: 16,
+            image_default_count: default_image_default_count(),
+            image_count_min: default_image_count_min(),
+            image_count_max: default_image_count_max(),
             volume_percent: 28,
             avoid_recent: true,
             recent_history_size: 40,
@@ -126,8 +147,36 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Clamp against the **current** media mode's min/max.
     pub fn clamp_count(&self, n: usize) -> usize {
-        n.clamp(self.count_min, self.count_max)
+        self.clamp_count_for(self.media_mode, n)
+    }
+
+    pub fn clamp_count_for(&self, mode: MediaMode, n: usize) -> usize {
+        let (lo, hi) = self.count_bounds_for(mode);
+        n.clamp(lo, hi)
+    }
+
+    pub fn count_bounds_for(&self, mode: MediaMode) -> (usize, usize) {
+        match mode {
+            MediaMode::Movie => (self.count_min, self.count_max),
+            MediaMode::Image => (self.image_count_min, self.image_count_max),
+        }
+    }
+
+    pub fn default_count_for(&self, mode: MediaMode) -> usize {
+        match mode {
+            MediaMode::Movie => self.default_count,
+            MediaMode::Image => self.image_default_count,
+        }
+    }
+
+    pub fn set_default_count_for(&mut self, mode: MediaMode, n: usize) {
+        let n = self.clamp_count_for(mode, n);
+        match mode {
+            MediaMode::Movie => self.default_count = n,
+            MediaMode::Image => self.image_default_count = n,
+        }
     }
 
     /// Movie roots (legacy name kept).
@@ -176,28 +225,80 @@ impl Config {
     pub const ABS_COUNT_MAX: usize = 32;
 
     pub fn set_count_min(&mut self, n: usize) {
-        self.count_min = n.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
-        if self.count_max < self.count_min {
-            self.count_max = self.count_min;
-        }
-        self.default_count = self.default_count.clamp(self.count_min, self.count_max);
+        self.set_count_min_for(self.media_mode, n);
     }
 
     pub fn set_count_max(&mut self, n: usize) {
-        self.count_max = n.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
-        if self.count_min > self.count_max {
-            self.count_min = self.count_max;
+        self.set_count_max_for(self.media_mode, n);
+    }
+
+    pub fn set_count_min_for(&mut self, mode: MediaMode, n: usize) {
+        let n = n.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
+        match mode {
+            MediaMode::Movie => {
+                self.count_min = n;
+                if self.count_max < self.count_min {
+                    self.count_max = self.count_min;
+                }
+                self.default_count = self
+                    .default_count
+                    .clamp(self.count_min, self.count_max);
+            }
+            MediaMode::Image => {
+                self.image_count_min = n;
+                if self.image_count_max < self.image_count_min {
+                    self.image_count_max = self.image_count_min;
+                }
+                self.image_default_count = self
+                    .image_default_count
+                    .clamp(self.image_count_min, self.image_count_max);
+            }
         }
-        self.default_count = self.default_count.clamp(self.count_min, self.count_max);
+    }
+
+    pub fn set_count_max_for(&mut self, mode: MediaMode, n: usize) {
+        let n = n.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
+        match mode {
+            MediaMode::Movie => {
+                self.count_max = n;
+                if self.count_min > self.count_max {
+                    self.count_min = self.count_max;
+                }
+                self.default_count = self
+                    .default_count
+                    .clamp(self.count_min, self.count_max);
+            }
+            MediaMode::Image => {
+                self.image_count_max = n;
+                if self.image_count_min > self.image_count_max {
+                    self.image_count_min = self.image_count_max;
+                }
+                self.image_default_count = self
+                    .image_default_count
+                    .clamp(self.image_count_min, self.image_count_max);
+            }
+        }
     }
 
     pub fn normalize(mut self) -> Self {
-        self.count_min = self.count_min.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
-        self.count_max = self.count_max.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
-        if self.count_max < self.count_min {
-            self.count_max = self.count_min;
+        fn clamp_triple(min: &mut usize, max: &mut usize, def: &mut usize) {
+            *min = (*min).clamp(Config::ABS_COUNT_MIN, Config::ABS_COUNT_MAX);
+            *max = (*max).clamp(Config::ABS_COUNT_MIN, Config::ABS_COUNT_MAX);
+            if *max < *min {
+                *max = *min;
+            }
+            *def = (*def).clamp(*min, *max);
         }
-        self.default_count = self.default_count.clamp(self.count_min, self.count_max);
+        clamp_triple(
+            &mut self.count_min,
+            &mut self.count_max,
+            &mut self.default_count,
+        );
+        clamp_triple(
+            &mut self.image_count_min,
+            &mut self.image_count_max,
+            &mut self.image_default_count,
+        );
         self.volume_percent = self.volume_percent.min(100);
         normalize_ext_list(&mut self.video_extensions);
         normalize_ext_list(&mut self.image_extensions);
@@ -377,6 +478,30 @@ mod tests {
         assert_eq!(c.clamp_count(1), 1);
         assert_eq!(c.clamp_count(6), 6);
         assert_eq!(c.clamp_count(99), 16);
+    }
+
+    #[test]
+    fn image_and_movie_counts_are_independent() {
+        let mut c = Config::default();
+        c.media_mode = MediaMode::Movie;
+        c.set_count_min_for(MediaMode::Movie, 2);
+        c.set_count_max_for(MediaMode::Movie, 8);
+        c.set_default_count_for(MediaMode::Movie, 5);
+
+        c.set_count_min_for(MediaMode::Image, 4);
+        c.set_count_max_for(MediaMode::Image, 20);
+        c.set_default_count_for(MediaMode::Image, 12);
+
+        assert_eq!(c.count_bounds_for(MediaMode::Movie), (2, 8));
+        assert_eq!(c.default_count_for(MediaMode::Movie), 5);
+        assert_eq!(c.count_bounds_for(MediaMode::Image), (4, 20));
+        assert_eq!(c.default_count_for(MediaMode::Image), 12);
+
+        // Movie clamp must not use image bounds
+        c.media_mode = MediaMode::Movie;
+        assert_eq!(c.clamp_count(99), 8);
+        c.media_mode = MediaMode::Image;
+        assert_eq!(c.clamp_count(99), 20);
     }
 
     #[test]

@@ -73,8 +73,15 @@ fn main() -> eframe::Result<()> {
 
     let n_roots = cfg.library_roots().len();
     log_line(&format!(
-        "session: roots={} count={} range={}-{}",
-        n_roots, cfg.default_count, cfg.count_min, cfg.count_max
+        "session: mode={:?} movie_roots={} count={} range={}-{} | image count={} range={}-{}",
+        cfg.media_mode,
+        n_roots,
+        cfg.default_count,
+        cfg.count_min,
+        cfg.count_max,
+        cfg.image_default_count,
+        cfg.image_count_min,
+        cfg.image_count_max
     ));
 
     let session = SessionHandle::new(cfg);
