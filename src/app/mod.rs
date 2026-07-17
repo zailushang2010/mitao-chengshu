@@ -100,7 +100,9 @@ impl SuijiApp {
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
 
-        let pot_path_edit = session.config_clone().potplayer_path;
+        let cfg0 = session.config_clone();
+        let pot_path_edit = cfg0.potplayer_path.clone();
+        let sidebar_open = cfg0.workbench_sidebar_open;
         let tray = match TrayService::try_new(cc.egui_ctx.clone()) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -144,8 +146,9 @@ impl SuijiApp {
             pin_while_playing: true,
             pin_level_applied: false,
             window_was_minimized: false,
-            sidebar_open: true,
-            sidebar_vis: 1.0,
+            // Restore workbench rail; snap vis so first frame matches config (no flash).
+            sidebar_open,
+            sidebar_vis: if sidebar_open { 1.0 } else { 0.0 },
             slide_index: 0,
             slide_elapsed: 0.0,
             slide_paused: false,
@@ -164,6 +167,15 @@ impl SuijiApp {
             age: 0.0,
             hold: 2.0,
         });
+    }
+
+    /// Toggle/set workbench ops rail and persist to config.
+    fn set_sidebar_open(&mut self, open: bool) {
+        if self.sidebar_open == open {
+            return;
+        }
+        self.sidebar_open = open;
+        self.session.set_workbench_sidebar_open(open);
     }
 
     fn toast_alpha(t: &ToastState) -> f32 {
@@ -579,7 +591,8 @@ impl eframe::App for SuijiApp {
                                 )
                                 .clicked()
                                 {
-                                    self.sidebar_open = !self.sidebar_open;
+                                    let next = !self.sidebar_open;
+                                    self.set_sidebar_open(next);
                                 }
 
                                 // Mode switch — primary workbench context
@@ -1231,7 +1244,7 @@ impl eframe::App for SuijiApp {
                                                             if mini_text_btn(ui, "操作栏")
                                                                 .clicked()
                                                             {
-                                                                self.sidebar_open = true;
+                                                                self.set_sidebar_open(true);
                                                             }
                                                         },
                                                     );

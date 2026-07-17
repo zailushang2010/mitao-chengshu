@@ -104,10 +104,17 @@ pub struct Config {
     /// `-1` = system primary work area (SPI); `0..` = `tiler::list_monitors()` index.
     #[serde(default = "default_tile_monitor_index")]
     pub tile_monitor_index: i32,
+    /// Workbench ops rail open (persisted across launches).
+    #[serde(default = "default_workbench_sidebar_open")]
+    pub workbench_sidebar_open: bool,
 }
 
 fn default_tile_monitor_index() -> i32 {
     -1
+}
+
+fn default_workbench_sidebar_open() -> bool {
+    true
 }
 
 fn default_image_extensions() -> Vec<String> {
@@ -157,6 +164,7 @@ impl Default for Config {
             close_session_on_exit: false,
             minimize_to_tray: false,
             tile_monitor_index: default_tile_monitor_index(),
+            workbench_sidebar_open: default_workbench_sidebar_open(),
         }
     }
 }
@@ -579,6 +587,23 @@ mod tests {
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.library_roots().len(), 2);
         assert_eq!(loaded.default_count, 8);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn workbench_sidebar_defaults_open_and_roundtrips() {
+        let path = tmp_file("sidebar.json");
+        let mut c = Config::default();
+        assert!(c.workbench_sidebar_open);
+        c.workbench_sidebar_open = false;
+        save_to(&path, &c).unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert!(!loaded.workbench_sidebar_open);
+        // Missing field → default true
+        let raw = r#"{"default_count":4,"count_min":1,"count_max":8,"avoid_recent":true,"recent_history_size":10,"potplayer_path":"","video_extensions":[],"close_session_on_exit":false}"#;
+        fs::write(&path, raw).unwrap();
+        let legacy = load_from(&path).unwrap();
+        assert!(legacy.workbench_sidebar_open);
         let _ = fs::remove_file(&path);
     }
 }

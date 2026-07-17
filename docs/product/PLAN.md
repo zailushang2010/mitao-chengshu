@@ -22,6 +22,7 @@
 | P2-wb | done | 工作台壳层 + 置顶修复 + 新图标 | 见 changes/2026-07-17-workbench-shell；0.6.1 |
 | P2-2 | done | 多显示器选择工作区 | 设置下拉；resolve_work_area；0.6.1 |
 | P2-3 | done | VERIFY 手测清单模板 + 脚本 | checklist + new-verify-entry + verify.ps1 |
+| P2-4 | done | 侧栏开合写 config | workbench_sidebar_open；0.6.2 |
 
 ---
 
@@ -74,6 +75,6 @@
 
 | 候选 | 说明 |
 |------|------|
-| 侧栏开合写 config | 重启保持工作台状态 |
 | 显示器按设备名匹配 | 热插拔后 index 更稳 |
+| 记住窗口大小/位置 | 可选；注意多屏坐标 |
 | pack 集成 verify 入口说明 | README 一节 |

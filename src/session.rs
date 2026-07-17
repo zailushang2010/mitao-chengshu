@@ -761,6 +761,15 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
+    pub fn set_workbench_sidebar_open(&self, open: bool) {
+        let mut g = self.inner.lock().unwrap();
+        if g.config.workbench_sidebar_open == open {
+            return;
+        }
+        g.config.workbench_sidebar_open = open;
+        let _ = crate::config::save(&g.config);
+    }
+
     pub fn set_minimize_to_tray(&self, v: bool) {
         let mut g = self.inner.lock().unwrap();
         g.config.minimize_to_tray = v;

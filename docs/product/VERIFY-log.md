@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-07-17 · 0.6.2 · 侧栏开合持久化
+
+### DEFINE/PLAN
+
+- `docs/product/changes/2026-07-17-sidebar-persist-DEFINE-PLAN.md`
+
+### 命令
+
+- [x] `verify.ps1 -StopRunning` — **26 passed / 1 ignored** + release
+- [x] `pack.ps1` — `dist/蜜桃成熟-v0.6.2-win64.zip`（exe ~7.0 MB / zip ~3.7 MB）
+
+### 手测
+
+- [ ] 收起侧栏 → 退出 → 再开仍收起
+- [ ] 展开侧栏 → 退出 → 再开仍展开
+- [x] 单测：旧 config 无字段默认展开；false 可 roundtrip
+
+### REVIEW
+
+- PLAN P2-4 → done；版本 **0.6.2**  
+- 产物：`dist/蜜桃成熟-v0.6.2-win64/`
+
+---
+
 ## 2026-07-17 · 0.6.1 · P2-3 手测模板落地
 
 ### DEFINE/PLAN

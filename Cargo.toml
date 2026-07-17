@@ -1,6 +1,6 @@
 [package]
 name = "mitao_chengshu"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "蜜桃成熟 — 随机从本地片库开启多部电影到 PotPlayer 并网格平铺"
 authors = ["蜜桃成熟"]
