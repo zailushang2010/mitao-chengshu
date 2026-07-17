@@ -304,7 +304,14 @@ impl eframe::App for SuijiApp {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 5.0;
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("本轮数量").size(13.0).color(MUTED));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "本轮数量（{}–{}）",
+                                        cfg.count_min, cfg.count_max
+                                    ))
+                                    .size(13.0)
+                                    .color(MUTED),
+                                );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     let count = self.session.ui_count();
                                     if small_step_btn(ui, "+").clicked() {
@@ -317,8 +324,7 @@ impl eframe::App for SuijiApp {
                                             .strong(),
                                     );
                                     if small_step_btn(ui, "−").clicked() {
-                                        self.session
-                                            .set_ui_count(count.saturating_sub(1).max(1));
+                                        self.session.set_ui_count(count.saturating_sub(1));
                                     }
                                 });
                             });
@@ -433,6 +439,85 @@ impl eframe::App for SuijiApp {
                                 .size(12.0),
                             );
                         });
+                    }
+
+                    // ── Per-item ops while playing ──
+                    if snap.phase == SessionPhase::Playing && !snap.items.is_empty() {
+                        ui.add_space(4.0);
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin {
+                                left: 18,
+                                right: 18,
+                                top: 0,
+                                bottom: 2,
+                            })
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("本轮影片 · 可单独操作")
+                                        .size(11.0)
+                                        .color(FAINT),
+                                );
+                                ui.add_space(3.0);
+                                egui::ScrollArea::vertical()
+                                    .max_height(140.0)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
+                                        let mut close_idx: Option<usize> = None;
+                                        let mut focus_idx: Option<usize> = None;
+                                        let mut solo_idx: Option<usize> = None;
+                                        for it in &snap.items {
+                                            egui::Frame::NONE
+                                                .fill(BG_SOFT)
+                                                .stroke(Stroke::new(1.0, LINE))
+                                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{}. {}",
+                                                                it.index + 1,
+                                                                truncate_path(&it.name, 22)
+                                                            ))
+                                                            .size(12.0)
+                                                            .color(INK),
+                                                        );
+                                                        ui.with_layout(
+                                                            Layout::right_to_left(Align::Center),
+                                                            |ui| {
+                                                                if mini_text_btn(ui, "关闭").clicked()
+                                                                {
+                                                                    close_idx = Some(it.index);
+                                                                }
+                                                                ui.add_space(4.0);
+                                                                if mini_text_btn(ui, "独播").clicked()
+                                                                {
+                                                                    solo_idx = Some(it.index);
+                                                                }
+                                                                ui.add_space(4.0);
+                                                                if mini_text_btn(ui, "置前").clicked()
+                                                                {
+                                                                    focus_idx = Some(it.index);
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                });
+                                            ui.add_space(3.0);
+                                        }
+                                        if let Some(i) = focus_idx {
+                                            self.session.focus_item(i);
+                                            self.show_window(ctx);
+                                        }
+                                        if let Some(i) = solo_idx {
+                                            self.session.solo_item(i);
+                                            self.show_window(ctx);
+                                        }
+                                        if let Some(i) = close_idx {
+                                            self.session.close_item(i);
+                                            self.fit_height_frames = 4;
+                                        }
+                                    });
+                            });
                     }
 
                     ui.add_space(6.0);
@@ -588,6 +673,64 @@ impl SuijiApp {
                         .size(11.0)
                         .color(FAINT),
                 );
+
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("本轮数量范围（可改，不再固定 5–10）")
+                        .size(13.0)
+                        .color(MUTED),
+                );
+                ui.add_space(4.0);
+                {
+                    let cfg_now = self.session.config_clone();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("下限").size(12.5).color(MUTED));
+                        if small_step_btn(ui, "−").clicked() {
+                            self.session.set_count_bounds(
+                                cfg_now.count_min.saturating_sub(1),
+                                cfg_now.count_max,
+                            );
+                        }
+                        ui.label(
+                            RichText::new(format!("{}", cfg_now.count_min))
+                                .size(15.0)
+                                .color(INK)
+                                .strong(),
+                        );
+                        if small_step_btn(ui, "+").clicked() {
+                            self.session
+                                .set_count_bounds(cfg_now.count_min + 1, cfg_now.count_max);
+                        }
+
+                        ui.add_space(16.0);
+                        ui.label(RichText::new("上限").size(12.5).color(MUTED));
+                        if small_step_btn(ui, "−").clicked() {
+                            self.session.set_count_bounds(
+                                cfg_now.count_min,
+                                cfg_now.count_max.saturating_sub(1),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(format!("{}", cfg_now.count_max))
+                                .size(15.0)
+                                .color(INK)
+                                .strong(),
+                        );
+                        if small_step_btn(ui, "+").clicked() {
+                            self.session
+                                .set_count_bounds(cfg_now.count_min, cfg_now.count_max + 1);
+                        }
+                    });
+                    ui.label(
+                        RichText::new(format!(
+                            "绝对范围 {}–{}；改后主界面「本轮数量」按此限制",
+                            crate::config::Config::ABS_COUNT_MIN,
+                            crate::config::Config::ABS_COUNT_MAX
+                        ))
+                        .size(11.0)
+                        .color(FAINT),
+                    );
+                }
 
                 ui.add_space(14.0);
                 ui.label(
@@ -771,6 +914,33 @@ fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     } else {
         ui.interact(rect, ui.id().with("disabled_primary"), Sense::hover())
     }
+}
+
+fn mini_text_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let pad = Vec2::new(8.0, 3.0);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(11.0),
+        INK,
+    );
+    let size = galley.size() + pad * 2.0;
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let stroke = if resp.hovered() {
+        Stroke::new(1.0, INK)
+    } else {
+        Stroke::new(1.0, FAINT)
+    };
+    ui.painter()
+        .rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 1.0, BG_SOFT);
+    }
+    ui.painter().galley(
+        egui::pos2(rect.left() + pad.x, rect.top() + pad.y),
+        galley,
+        INK,
+    );
+    resp
 }
 
 fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> egui::Response {

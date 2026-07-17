@@ -37,7 +37,7 @@ cargo build --release
 | `library_paths` | 电影目录列表（可多个） |
 | `library_path` | 兼容旧单路径，会并入 `library_paths` |
 | `default_count` | 默认开启数量 |
-| `count_min` / `count_max` | 数量调节范围 |
+| `count_min` / `count_max` | 数量调节范围（设置里可改，绝对 1–32） |
 | `volume_percent` | 音量偏好（0–100） |
 | `avoid_recent` | 是否避开最近播放 |
 | `recent_history_size` | 历史条数上限 |

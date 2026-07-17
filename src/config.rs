@@ -31,8 +31,9 @@ impl Default for Config {
             library_path: String::new(),
             library_paths: Vec::new(),
             default_count: 6,
-            count_min: 5,
-            count_max: 10,
+            // Soft defaults; both limits are user-editable in settings.
+            count_min: 1,
+            count_max: 16,
             volume_percent: 28,
             avoid_recent: true,
             recent_history_size: 40,
@@ -82,10 +83,29 @@ impl Config {
         }
     }
 
-    pub fn normalize(mut self) -> Self {
-        if self.count_min == 0 {
-            self.count_min = 1;
+    /// Absolute safety caps (prevents absurd process storms).
+    pub const ABS_COUNT_MIN: usize = 1;
+    pub const ABS_COUNT_MAX: usize = 32;
+
+    pub fn set_count_min(&mut self, n: usize) {
+        self.count_min = n.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
+        if self.count_max < self.count_min {
+            self.count_max = self.count_min;
         }
+        self.default_count = self.default_count.clamp(self.count_min, self.count_max);
+    }
+
+    pub fn set_count_max(&mut self, n: usize) {
+        self.count_max = n.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
+        if self.count_min > self.count_max {
+            self.count_min = self.count_max;
+        }
+        self.default_count = self.default_count.clamp(self.count_min, self.count_max);
+    }
+
+    pub fn normalize(mut self) -> Self {
+        self.count_min = self.count_min.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
+        self.count_max = self.count_max.clamp(Self::ABS_COUNT_MIN, Self::ABS_COUNT_MAX);
         if self.count_max < self.count_min {
             self.count_max = self.count_min;
         }
@@ -231,9 +251,9 @@ mod tests {
     #[test]
     fn clamp_count_respects_bounds() {
         let c = Config::default();
-        assert_eq!(c.clamp_count(1), 5);
+        assert_eq!(c.clamp_count(1), 1);
         assert_eq!(c.clamp_count(6), 6);
-        assert_eq!(c.clamp_count(99), 10);
+        assert_eq!(c.clamp_count(99), 16);
     }
 
     #[test]

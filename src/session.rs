@@ -18,10 +18,19 @@ pub enum SessionPhase {
 }
 
 #[derive(Debug, Clone)]
+pub struct SessionItemView {
+    pub index: usize,
+    pub path: PathBuf,
+    pub pid: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub phase: SessionPhase,
     pub message: String,
     pub current_files: Vec<PathBuf>,
+    pub items: Vec<SessionItemView>,
     pub library_count: usize,
     /// Short UI label (1 path or "A 等 N 个目录")
     #[allow(dead_code)]
@@ -37,6 +46,7 @@ impl Default for SessionSnapshot {
             phase: SessionPhase::Idle,
             message: "就绪".into(),
             current_files: Vec::new(),
+            items: Vec::new(),
             library_count: 0,
             library_root: String::new(),
             library_roots: Vec::new(),
@@ -83,10 +93,26 @@ impl SessionHandle {
 
     pub fn snapshot(&self) -> SessionSnapshot {
         let g = self.inner.lock().unwrap();
+        let items: Vec<SessionItemView> = g
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, i)| SessionItemView {
+                index,
+                path: i.path.clone(),
+                pid: i.pid,
+                name: i
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| i.path.display().to_string()),
+            })
+            .collect();
         SessionSnapshot {
             phase: g.phase,
             message: g.message.clone(),
-            current_files: g.items.iter().map(|i| i.path.clone()).collect(),
+            current_files: items.iter().map(|i| i.path.clone()).collect(),
+            items,
             library_count: g.library.len(),
             library_root: g.config.library_label(),
             library_roots: g.config.library_roots(),
@@ -107,6 +133,75 @@ impl SessionHandle {
         g.ui_count = g.config.clamp_count(n);
         g.config.default_count = g.ui_count;
         let _ = crate::config::save(&g.config);
+    }
+
+    pub fn set_count_bounds(&self, min: usize, max: usize) {
+        let mut g = self.inner.lock().unwrap();
+        g.config.set_count_min(min);
+        g.config.set_count_max(max);
+        g.ui_count = g.config.clamp_count(g.ui_count);
+        g.config.default_count = g.ui_count;
+        let _ = crate::config::save(&g.config);
+    }
+
+    /// Bring one playing item to the front.
+    pub fn focus_item(&self, index: usize) {
+        let pid = {
+            let g = self.inner.lock().unwrap();
+            g.items.get(index).map(|i| i.pid)
+        };
+        if let Some(pid) = pid {
+            potplayer::focus_pid(pid);
+        }
+    }
+
+    /// Close all others and maximize this one (独播).
+    pub fn solo_item(&self, index: usize) {
+        let (keep, kill) = {
+            let g = self.inner.lock().unwrap();
+            if index >= g.items.len() {
+                return;
+            }
+            let keep = g.items[index].clone();
+            let kill: Vec<u32> = g
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != index)
+                .map(|(_, it)| it.pid)
+                .collect();
+            (keep, kill)
+        };
+        if !kill.is_empty() {
+            potplayer::kill_pids(&kill);
+        }
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.items = vec![keep.clone()];
+            g.phase = SessionPhase::Playing;
+            g.message = format!("独播 · {}", file_stem(&keep.path));
+        }
+        potplayer::maximize_pid(keep.pid);
+        potplayer::focus_pid(keep.pid);
+    }
+
+    /// Close one playing item; if none left → Idle.
+    pub fn close_item(&self, index: usize) {
+        let pid = {
+            let mut g = self.inner.lock().unwrap();
+            if index >= g.items.len() {
+                return;
+            }
+            let item = g.items.remove(index);
+            if g.items.is_empty() {
+                g.phase = SessionPhase::Idle;
+                g.message = format!("就绪 · 已索引 {} 部", g.library.len());
+            } else {
+                g.message = format!("播放中 · {} 部", g.items.len());
+            }
+            item.pid
+        };
+        let _ = potplayer::kill_pid(pid);
     }
 
     pub fn set_volume(&self, v: u8) {
@@ -374,6 +469,12 @@ fn scan_config_roots(roots: &[String], exts: &[String]) -> Library {
     }
     let paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     Library::scan_many(&paths, exts)
+}
+
+fn file_stem(p: &std::path::Path) -> String {
+    p.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 fn tile_session(pids: &[u32]) {

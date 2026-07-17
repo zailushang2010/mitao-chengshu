@@ -73,7 +73,7 @@ pub fn kill_pids(pids: &[u32]) {
     }
 }
 
-fn kill_pid(pid: u32) -> Result<(), String> {
+pub fn kill_pid(pid: u32) -> Result<(), String> {
     unsafe {
         let handle: HANDLE =
             OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|e| e.to_string())?;
@@ -82,6 +82,70 @@ fn kill_pid(pid: u32) -> Result<(), String> {
         result.map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Focus / restore the main window of a PotPlayer process.
+pub fn focus_pid(pid: u32) {
+    let pairs = find_hwnds_for_pids(&[pid], 6, 80);
+    for (_, hwnd) in pairs {
+        raise_hwnd(hwnd as isize);
+    }
+}
+
+/// Maximize (独播感) the window for a PID.
+pub fn maximize_pid(pid: u32) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MAXIMIZE, SW_RESTORE, SW_SHOW};
+
+    let pairs = find_hwnds_for_pids(&[pid], 6, 80);
+    for (_, h) in pairs {
+        unsafe {
+            let hwnd = HWND(h as *mut _);
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+        }
+        raise_hwnd(h);
+    }
+}
+
+fn raise_hwnd(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
+        HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    };
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        let _ = ShowWindow(h, SW_SHOWNORMAL);
+        let _ = ShowWindow(h, SW_SHOW);
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
+        let _ = SetWindowPos(
+            h,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+        let _ = BringWindowToTop(h);
+        let _ = SetForegroundWindow(h);
+        let _ = SetWindowPos(
+            h,
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+    }
 }
 
 /// Find primary (largest visible top-level) window for each PID, with retries.
