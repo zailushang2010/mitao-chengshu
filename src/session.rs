@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::{Config, ImagePlayStyle, MediaMode};
 use crate::history::History;
@@ -107,8 +107,10 @@ struct Inner {
     ui_count: usize,
     /// Live counter while a background scan runs for any mode.
     scan_found: Arc<AtomicUsize>,
-    /// Keep re-tiling until this instant (late windows / self-moving PotPlayer).
-    retile_until: Option<Instant>,
+    /// Geometry guard running: force cell size for whole Playing session.
+    geometry_guard: bool,
+    /// Assigned grid cell per PID (source of truth for enforcement).
+    tile_targets: std::collections::HashMap<u32, tiler::Rect>,
 }
 
 impl Inner {
@@ -236,7 +238,8 @@ impl SessionHandle {
             last_errors: Vec::new(),
             ui_count,
             scan_found: Arc::new(AtomicUsize::new(0)),
-            retile_until: None,
+            geometry_guard: false,
+            tile_targets: std::collections::HashMap::new(),
         };
         // Initial index for active mode only (keeps other mode for first switch).
         let roots = inner.config.roots_for(mode);
@@ -347,6 +350,7 @@ impl SessionHandle {
                 match g.phase {
                     SessionPhase::Playing if !g.items.is_empty() => {
                         let items = std::mem::take(&mut g.items);
+                        // Keep tile_targets + geometry_guard so background pots stay in grid
                         g.parked_movie = Some(ParkedMovie { items });
                         g.phase = SessionPhase::Idle;
                     }
@@ -358,6 +362,8 @@ impl SessionHandle {
                             .filter(|p| *p != 0)
                             .collect();
                         g.items.clear();
+                        g.tile_targets.clear();
+                        g.geometry_guard = false;
                         g.phase = SessionPhase::Idle;
                     }
                     _ => {
@@ -385,6 +391,10 @@ impl SessionHandle {
                     let n = parked.items.len();
                     g.items = parked.items;
                     g.phase = SessionPhase::Playing;
+                    // Resume grid enforcement with existing targets if any
+                    if !g.tile_targets.is_empty() {
+                        g.geometry_guard = true;
+                    }
                     g.message = format!("播放中 · {n} 部 · 已从图片切回，可「关闭本轮」");
                 } else {
                     g.phase = SessionPhase::Idle;
@@ -581,6 +591,9 @@ impl SessionHandle {
             let mut g = self.inner.lock().unwrap();
             g.items = vec![keep.clone()];
             g.phase = SessionPhase::Playing;
+            // Solo is intentionally full-screen — pause grid enforcement
+            g.geometry_guard = false;
+            g.tile_targets.clear();
             g.message = format!("独播 · {}", file_stem(&keep.path));
         }
         potplayer::maximize_pid(keep.pid);
@@ -589,21 +602,28 @@ impl SessionHandle {
 
     /// Close one playing item; if none left → Idle.
     pub fn close_item(&self, index: usize) {
-        let pid = {
+        let (pid, regrid) = {
             let mut g = self.inner.lock().unwrap();
             if index >= g.items.len() {
                 return;
             }
             let item = g.items.remove(index);
+            g.tile_targets.remove(&item.pid);
             if g.items.is_empty() {
                 g.phase = SessionPhase::Idle;
+                g.geometry_guard = false;
+                g.tile_targets.clear();
                 g.message = format!("就绪 · 已索引 {} 部", g.library().len());
+                (item.pid, false)
             } else {
                 g.message = format!("播放中 · {} 部", g.items.len());
+                (item.pid, true)
             }
-            item.pid
         };
         let _ = potplayer::kill_pid(pid);
+        if regrid {
+            self.retile_now();
+        }
     }
 
     pub fn set_avoid_recent(&self, v: bool) {
@@ -831,7 +851,8 @@ impl SessionHandle {
 
         g.phase = SessionPhase::Stopping;
         g.message = "正在关闭本轮…".into();
-        g.retile_until = None;
+        g.geometry_guard = false;
+        g.tile_targets.clear();
         let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
         g.items.clear();
         // Also clear any stray parked (should be empty in movie mode).
@@ -856,27 +877,48 @@ impl SessionHandle {
         });
     }
 
-    /// Force re-tile current movie players and extend auto-settle a few more seconds.
+    /// Recompute grid from live items and re-enable geometry guard.
     pub fn retile_now(&self) {
-        let pids: Vec<u32> = {
+        let (pids, area) = {
             let mut g = self.inner.lock().unwrap();
             if g.phase != SessionPhase::Playing || g.config.media_mode != MediaMode::Movie {
                 return;
             }
-            g.retile_until = Some(Instant::now() + Duration::from_secs(10));
-            g.items
+            let pids: Vec<u32> = g
+                .items
                 .iter()
                 .map(|i| i.pid)
                 .filter(|p| *p != 0)
-                .collect()
+                .collect();
+            let Ok(area) = tiler::work_area() else {
+                return;
+            };
+            let rects = tiler::grid_layout(pids.len(), area);
+            g.tile_targets.clear();
+            for (pid, rect) in pids.iter().zip(rects.iter()) {
+                g.tile_targets.insert(*pid, *rect);
+            }
+            g.geometry_guard = true;
+            (pids, area)
         };
         if pids.is_empty() {
             return;
         }
         thread::spawn(move || {
-            tile_session(&pids);
-            thread::sleep(Duration::from_millis(400));
-            tile_session(&pids);
+            let rects = tiler::grid_layout(pids.len(), area);
+            let hwnds = potplayer::hwnds_aligned_to_pids(&pids, 12, 80);
+            for (h, r) in hwnds.iter().zip(rects.iter()) {
+                if *h != 0 {
+                    let _ = tiler::place_window(*h, *r, true);
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+            let hwnds = potplayer::hwnds_aligned_to_pids(&pids, 6, 50);
+            for (h, r) in hwnds.iter().zip(rects.iter()) {
+                if *h != 0 {
+                    let _ = tiler::place_window(*h, *r, true);
+                }
+            }
         });
     }
 
@@ -1050,7 +1092,9 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
     };
 
-    let (launched, errors) = potplayer::launch_many(&pot, &chosen);
+    // Root strategy: hide each window ASAP on create → place into grid while hidden → show.
+    // Then geometry guard enforces cells for the entire Playing session (not a timed delay).
+    let (launched, mut hwnds, errors) = potplayer::launch_many_hidden(&pot, &chosen);
 
     if launched.is_empty() {
         let mut g = handle.lock().unwrap();
@@ -1062,66 +1106,48 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
 
     let pids: Vec<u32> = launched.iter().map(|i| i.pid).collect();
     let n = pids.len();
-    // Wait until windows exist (scales with batch — many opens = more stragglers)
-    let settle_ms = 1200 + n as u64 * 180;
-    tile_session_wait(&pids, settle_ms);
-    thread::sleep(Duration::from_millis(300));
-    tile_session(&pids);
-
-    // Continuous re-tile window: late decoders + "remembered geometry" after open.
-    // e.g. 6 → ~17s, 10 → ~23s, cap 30s. Interval starts tight then eases out.
-    let retile_secs = (10.0 + n as f32 * 1.4).min(30.0);
-    {
-        let mut g = handle.lock().unwrap();
-        g.retile_until = Some(Instant::now() + Duration::from_secs_f32(retile_secs));
-    }
-    let handle_retile = handle.clone();
-    let pids_retile = pids.clone();
-    thread::spawn(move || {
-        let mut step_ms: u64 = 450;
-        loop {
-            thread::sleep(Duration::from_millis(step_ms));
-            let still = {
-                let g = handle_retile.lock().unwrap();
-                let active = g.phase == SessionPhase::Playing
-                    && g.config.media_mode == MediaMode::Movie
-                    && !g.items.is_empty();
-                let until_ok = g
-                    .retile_until
-                    .map(|t| Instant::now() < t)
-                    .unwrap_or(false);
-                if !active || !until_ok {
-                    false
-                } else {
-                    true
-                }
-            };
-            if !still {
-                let mut g = handle_retile.lock().unwrap();
-                g.retile_until = None;
-                break;
+    // Refresh any still-missing HWNDs
+    for (i, pid) in pids.iter().enumerate() {
+        if hwnds.get(i).copied().unwrap_or(0) == 0 {
+            let h = potplayer::wait_single_hwnd(*pid, 2000);
+            if let Some(slot) = hwnds.get_mut(i) {
+                *slot = h;
             }
-            // Prefer live item list (reap may have removed dead PIDs)
-            let live_pids: Vec<u32> = {
-                let g = handle_retile.lock().unwrap();
-                g.items
-                    .iter()
-                    .map(|i| i.pid)
-                    .filter(|p| *p != 0)
-                    .collect()
-            };
-            let use_pids = if live_pids.is_empty() {
-                pids_retile.clone()
-            } else {
-                live_pids
-            };
-            tile_session_quick(&use_pids);
-            // Slow down gradually so we don't fight user after things settle
-            step_ms = (step_ms + 80).min(1000);
+            if h != 0 {
+                tiler::hide_window(h);
+            }
         }
-    });
+    }
 
-    // Update history with successfully launched
+    let Ok(area) = tiler::work_area() else {
+        let mut g = handle.lock().unwrap();
+        g.phase = SessionPhase::Idle;
+        g.message = "无法读取屏幕工作区".into();
+        return;
+    };
+    let rects = tiler::grid_layout(n, area);
+
+    // Place while hidden, then show — no flash of remembered fullscreen
+    for (h, r) in hwnds.iter().zip(rects.iter()) {
+        if *h != 0 {
+            let _ = tiler::place_window(*h, *r, false);
+        }
+    }
+    thread::sleep(Duration::from_millis(80));
+    for (h, r) in hwnds.iter().zip(rects.iter()) {
+        if *h != 0 {
+            let _ = tiler::place_window(*h, *r, true);
+        }
+    }
+    // One more enforce after show (player may nudge on first paint)
+    thread::sleep(Duration::from_millis(200));
+    for (h, r) in hwnds.iter().zip(rects.iter()) {
+        if *h != 0 {
+            let _ = tiler::place_window(*h, *r, true);
+        }
+    }
+
+    // Commit session + targets, start permanent geometry guard
     {
         let mut g = handle.lock().unwrap();
         let paths: Vec<PathBuf> = launched.iter().map(|i| i.path.clone()).collect();
@@ -1130,18 +1156,64 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         g.history_mut().push_many(&paths, hist_size);
         let hist = g.history().clone();
         save_history(mode, &hist);
-        // Keep preview in sync with what actually launched
         g.preview_files = paths.clone();
         sync_preview_store(&mut g);
         g.items = launched;
         g.phase = SessionPhase::Playing;
         g.last_errors = errors;
+        g.tile_targets.clear();
+        for (pid, rect) in pids.iter().zip(rects.iter()) {
+            g.tile_targets.insert(*pid, *rect);
+        }
+        g.geometry_guard = true;
         let mut msg = format!("播放中 · {} 部", g.items.len());
         if !g.last_errors.is_empty() {
             msg.push_str(" · 部分失败");
         }
         g.message = msg;
     }
+
+    // Geometry guard: whole Playing lifetime — fix whenever PotPlayer restores old pos/size
+    let handle_guard = handle.clone();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(140));
+            let (guard_on, targets, should_exit): (bool, Vec<(u32, tiler::Rect)>, bool) = {
+                let g = handle_guard.lock().unwrap();
+                // Enforce while Playing *or* pots parked in background (image mode)
+                let pots_live = (g.phase == SessionPhase::Playing
+                    && g.config.media_mode == MediaMode::Movie
+                    && !g.items.is_empty())
+                    || g.parked_movie.is_some();
+                if !pots_live {
+                    (false, Vec::new(), true)
+                } else if !g.geometry_guard || g.tile_targets.is_empty() {
+                    (false, Vec::new(), false)
+                } else {
+                    (
+                        true,
+                        g.tile_targets.iter().map(|(p, r)| (*p, *r)).collect(),
+                        false,
+                    )
+                }
+            };
+            if should_exit {
+                break;
+            }
+            if !guard_on {
+                continue;
+            }
+            // Refresh HWNDs and snap any drift back to assigned cell
+            let pids: Vec<u32> = targets.iter().map(|(p, _)| *p).collect();
+            let hwnds = potplayer::hwnds_aligned_to_pids(&pids, 3, 30);
+            for (i, (_pid, rect)) in targets.iter().enumerate() {
+                let h = hwnds.get(i).copied().unwrap_or(0);
+                if h != 0 && !tiler::matches_target(h, *rect, 12) {
+                    let _ = tiler::place_window(h, *rect, true);
+                }
+            }
+        }
+    });
 
     // After PotPlayers open, raise control panel and pin it (app clears pin on minimize).
     thread::spawn(|| {
@@ -1158,52 +1230,5 @@ fn file_stem(p: &std::path::Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-/// Tile all launched PIDs into a full-N grid (missing HWNDs keep their slot empty).
-/// Returns how many windows were actually moved.
-fn tile_session(pids: &[u32]) -> usize {
-    if pids.is_empty() {
-        return 0;
-    }
-    let hwnds = potplayer::hwnds_aligned_to_pids(pids, 16, 100);
-    apply_tile(pids, &hwnds, true)
-}
-
-/// Faster path for the continuous retile loop (must not sleep too long).
-fn tile_session_quick(pids: &[u32]) -> usize {
-    if pids.is_empty() {
-        return 0;
-    }
-    let hwnds = potplayer::hwnds_aligned_to_pids(pids, 5, 40);
-    apply_tile(pids, &hwnds, false)
-}
-
-fn tile_session_wait(pids: &[u32], timeout_ms: u64) -> usize {
-    if pids.is_empty() {
-        return 0;
-    }
-    let hwnds = potplayer::wait_hwnds_aligned(pids, timeout_ms);
-    apply_tile(pids, &hwnds, true)
-}
-
-fn apply_tile(pids: &[u32], hwnds: &[isize], stable: bool) -> usize {
-    let found = hwnds.iter().filter(|&&h| h != 0).count();
-    if found == 0 {
-        return 0;
-    }
-    let Ok(area) = tiler::work_area() else {
-        return 0;
-    };
-    // Full launch count grid — last index always maps to last cell
-    let rects = tiler::grid_layout(pids.len(), area);
-    if rects.len() != hwnds.len() {
-        return 0;
-    }
-    if stable {
-        tiler::tile_hwnds_stable(hwnds, &rects);
-    } else {
-        tiler::tile_hwnds(hwnds, &rects);
-    }
-    found
-}
 
 

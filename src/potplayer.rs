@@ -19,8 +19,8 @@ const CANDIDATES: &[&str] = &[
     r"C:\Program Files (x86)\DAUM\PotPlayer\PotPlayerMini.exe",
 ];
 
-/// Base stagger between multi-instance launches (grows with index for large batches).
-const LAUNCH_STAGGER_MS: u64 = 200;
+/// Gap between launches when using hide-then-place strategy (can be shorter).
+const LAUNCH_STAGGER_MS: u64 = 140;
 
 pub fn resolve_potplayer_path(configured: &str) -> Option<PathBuf> {
     if !configured.trim().is_empty() {
@@ -47,19 +47,10 @@ pub struct LaunchedItem {
 pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, Vec<String>) {
     let mut ok = Vec::new();
     let mut errors = Vec::new();
-    let last = files.len().saturating_sub(1);
 
     for (i, file) in files.iter().enumerate() {
         if i > 0 {
-            // Spread launches: later instances (esp. last) need more time to register
-            // without fighting earlier ones for focus / remembered geometry.
-            let mut gap = LAUNCH_STAGGER_MS + i as u64 * 55;
-            if i == last {
-                gap += 220;
-            }
-            // Cap so 16-open doesn't take forever (~4s max between two)
-            gap = gap.min(900);
-            thread::sleep(Duration::from_millis(gap));
+            thread::sleep(Duration::from_millis(LAUNCH_STAGGER_MS + i as u64 * 30));
         }
         match launch_one(potplayer, file) {
             Ok(pid) => ok.push(LaunchedItem {
@@ -69,12 +60,63 @@ pub fn launch_many(potplayer: &Path, files: &[PathBuf]) -> (Vec<LaunchedItem>, V
             Err(e) => errors.push(format!("{}: {e}", file.display())),
         }
     }
-    // Extra settle after last spawn (scales with batch size)
-    if !ok.is_empty() {
-        thread::sleep(Duration::from_millis(500 + ok.len() as u64 * 70));
-    }
 
     (ok, errors)
+}
+
+/// Launch each file, **hide the window as soon as it appears**, so PotPlayer cannot
+/// flash/restore its remembered size&pos before we place it.
+pub fn launch_many_hidden(
+    potplayer: &Path,
+    files: &[PathBuf],
+) -> (Vec<LaunchedItem>, Vec<isize>, Vec<String>) {
+    let mut ok = Vec::new();
+    let mut hwnds = Vec::new();
+    let mut errors = Vec::new();
+
+    for (i, file) in files.iter().enumerate() {
+        if i > 0 {
+            thread::sleep(Duration::from_millis(LAUNCH_STAGGER_MS + i as u64 * 25));
+        }
+        match launch_one(potplayer, file) {
+            Ok(pid) => {
+                // Poll until HWND, then hide immediately (root of "jump out" is visible restore)
+                let hwnd = wait_single_hwnd(pid, 4500);
+                if hwnd != 0 {
+                    // Hide ASAP so remembered size/pos never flashes on screen
+                    crate::tiler::hide_window(hwnd);
+                }
+                ok.push(LaunchedItem {
+                    path: file.clone(),
+                    pid,
+                });
+                hwnds.push(hwnd);
+            }
+            Err(e) => {
+                errors.push(format!("{}: {e}", file.display()));
+            }
+        }
+    }
+
+    (ok, hwnds, errors)
+}
+
+/// Wait for one process main window; returns 0 on timeout.
+pub fn wait_single_hwnd(pid: u32, timeout_ms: u64) -> isize {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        let list = hwnds_aligned_to_pids(&[pid], 2, 40);
+        if let Some(&h) = list.first() {
+            if h != 0 {
+                return h;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    hwnds_aligned_to_pids(&[pid], 8, 80)
+        .first()
+        .copied()
+        .unwrap_or(0)
 }
 
 pub fn launch_one(potplayer: &Path, file: &Path) -> Result<u32, String> {

@@ -1,8 +1,8 @@
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowPos, ShowWindow, SystemParametersInfoW, HWND_TOP, SPI_GETWORKAREA, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_ACTION,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    GetWindowRect, IsIconic, IsZoomed, SetWindowPos, ShowWindow, SystemParametersInfoW, HWND_TOP,
+    SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,68 +95,132 @@ pub fn grid_layout(n: usize, area: Rect) -> Vec<Rect> {
     out
 }
 
+pub fn hide_window(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        let _ = ShowWindow(h, SW_HIDE);
+    }
+}
+
+pub fn show_window(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        let _ = ShowWindow(h, SW_SHOW);
+        let _ = ShowWindow(h, SW_SHOWNORMAL);
+    }
+}
+
+pub fn current_rect(hwnd: isize) -> Option<Rect> {
+    if hwnd == 0 {
+        return None;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        let mut r = RECT::default();
+        if GetWindowRect(h, &mut r).is_err() {
+            return None;
+        }
+        Some(Rect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        })
+    }
+}
+
+/// True if window geometry matches target within `tol` pixels (and not max/min).
+pub fn matches_target(hwnd: isize, target: Rect, tol: i32) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        if IsZoomed(h).as_bool() || IsIconic(h).as_bool() {
+            return false;
+        }
+    }
+    let Some(cur) = current_rect(hwnd) else {
+        return false;
+    };
+    (cur.left - target.left).abs() <= tol
+        && (cur.top - target.top).abs() <= tol
+        && (cur.width() - target.width()).abs() <= tol * 2
+        && (cur.height() - target.height()).abs() <= tol * 2
+}
+
+/// Place window into cell. If `show` is false, keep hidden after move (root fix for flash/jump).
+pub fn place_window(hwnd: isize, rect: Rect, show: bool) -> Result<(), String> {
+    if hwnd == 0 {
+        return Ok(());
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        // Kill maximized / minimized / remembered chrome before sizing
+        let _ = ShowWindow(h, SW_RESTORE);
+        if !show {
+            let _ = ShowWindow(h, SW_HIDE);
+        } else {
+            let _ = ShowWindow(h, SW_SHOWNORMAL);
+        }
+        let mut flags = SWP_NOACTIVATE | SWP_FRAMECHANGED;
+        if show {
+            flags |= SWP_SHOWWINDOW;
+        }
+        // Apply twice: PotPlayer rewrites geometry on the first WM_WINDOWPOSCHANGED
+        for _ in 0..2 {
+            SetWindowPos(
+                h,
+                Some(HWND_TOP),
+                rect.left,
+                rect.top,
+                rect.width(),
+                rect.height(),
+                flags,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if show {
+            let _ = ShowWindow(h, SW_SHOW);
+        }
+    }
+    Ok(())
+}
+
 pub fn tile_hwnds(hwnds: &[isize], rects: &[Rect]) {
-    // Front-to-back first
     for (hwnd, rect) in hwnds.iter().zip(rects.iter()) {
         if *hwnd == 0 {
             continue;
         }
-        let _ = move_window(*hwnd, *rect);
-    }
-    // Last slot again — last-launched instance most often jumps out after open
-    if let (Some(&h), Some(r)) = (hwnds.last(), rects.last()) {
-        if h != 0 {
-            let _ = move_window(h, *r);
-        }
+        let _ = place_window(*hwnd, *rect, true);
     }
 }
 
-/// Place windows; multiple passes for stubborn / late PotPlayer instances.
 pub fn tile_hwnds_stable(hwnds: &[isize], rects: &[Rect]) {
     tile_hwnds(hwnds, rects);
-    std::thread::sleep(std::time::Duration::from_millis(220));
+    std::thread::sleep(std::time::Duration::from_millis(160));
     tile_hwnds(hwnds, rects);
-    std::thread::sleep(std::time::Duration::from_millis(180));
-    // Hammer the last window twice more (common offender)
-    if let (Some(&h), Some(r)) = (hwnds.last(), rects.last()) {
-        if h != 0 {
-            let _ = move_window(h, *r);
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            let _ = move_window(h, *r);
-        }
-    }
 }
 
-fn move_window(hwnd: isize, rect: Rect) -> Result<(), String> {
-    unsafe {
-        let h = HWND(hwnd as *mut _);
-        // Always restore — last instance often opens maximized / remembered fullscreen
-        let _ = ShowWindow(h, SW_RESTORE);
-        let _ = ShowWindow(h, SW_SHOWNORMAL);
-        let flags = SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED;
-        SetWindowPos(
-            h,
-            Some(HWND_TOP),
-            rect.left,
-            rect.top,
-            rect.width(),
-            rect.height(),
-            flags,
-        )
-        .map_err(|e| e.to_string())?;
-        // Immediate second apply — PotPlayer rewrites geometry on first message
-        SetWindowPos(
-            h,
-            Some(HWND_TOP),
-            rect.left,
-            rect.top,
-            rect.width(),
-            rect.height(),
-            flags,
-        )
-        .map_err(|e| e.to_string())?;
+/// Enforce map of pid→target using current hwnds (aligned lists).
+pub fn enforce_targets(hwnds: &[isize], rects: &[Rect], tol: i32) -> usize {
+    let mut fixed = 0;
+    for (hwnd, rect) in hwnds.iter().zip(rects.iter()) {
+        if *hwnd == 0 {
+            continue;
+        }
+        if !matches_target(*hwnd, *rect, tol) {
+            let _ = place_window(*hwnd, *rect, true);
+            fixed += 1;
+        }
     }
-    Ok(())
+    fixed
 }
 
 #[cfg(test)]
