@@ -29,13 +29,14 @@ pub struct SessionItemView {
 pub struct SessionSnapshot {
     pub phase: SessionPhase,
     pub message: String,
+    /// Paths shown in grid: preview list, or playing list
     pub current_files: Vec<PathBuf>,
+    /// True when a preview is ready but not playing yet
+    pub has_preview: bool,
     pub items: Vec<SessionItemView>,
     pub library_count: usize,
-    /// Short UI label (1 path or "A 等 N 个目录")
     #[allow(dead_code)]
     pub library_root: String,
-    /// Full list of configured roots
     pub library_roots: Vec<String>,
     pub last_errors: Vec<String>,
 }
@@ -46,6 +47,7 @@ impl Default for SessionSnapshot {
             phase: SessionPhase::Idle,
             message: "就绪".into(),
             current_files: Vec::new(),
+            has_preview: false,
             items: Vec::new(),
             library_count: 0,
             library_root: String::new(),
@@ -60,6 +62,8 @@ struct Inner {
     library: Library,
     history: History,
     phase: SessionPhase,
+    /// Selected for play (not launched yet)
+    preview_files: Vec<PathBuf>,
     items: Vec<LaunchedItem>,
     message: String,
     last_errors: Vec<String>,
@@ -81,8 +85,9 @@ impl SessionHandle {
             library,
             history,
             phase: SessionPhase::Idle,
+            preview_files: Vec::new(),
             items: Vec::new(),
-            message: "就绪".into(),
+            message: "就绪 · 先「随机预览」再「开启播放」".into(),
             last_errors: Vec::new(),
             ui_count,
         };
@@ -108,10 +113,23 @@ impl SessionHandle {
                     .unwrap_or_else(|| i.path.display().to_string()),
             })
             .collect();
+        let current_files = if g.phase == SessionPhase::Playing
+            || g.phase == SessionPhase::Starting
+            || g.phase == SessionPhase::Stopping
+        {
+            if items.is_empty() {
+                g.preview_files.clone()
+            } else {
+                items.iter().map(|i| i.path.clone()).collect()
+            }
+        } else {
+            g.preview_files.clone()
+        };
         SessionSnapshot {
             phase: g.phase,
             message: g.message.clone(),
-            current_files: items.iter().map(|i| i.path.clone()).collect(),
+            current_files,
+            has_preview: !g.preview_files.is_empty(),
             items,
             library_count: g.library.len(),
             library_root: g.config.library_label(),
@@ -285,33 +303,70 @@ impl SessionHandle {
 
         let mut g = self.inner.lock().unwrap();
         g.library = lib;
-        g.message = if g.library.is_empty() {
-            if roots.is_empty() {
-                "请先设置片库目录".into()
-            } else {
-                "片库中未找到视频".into()
-            }
-        } else {
-            let n_dirs = roots.len();
-            if n_dirs > 1 {
-                format!(
-                    "就绪 · {} 个目录 · 已索引 {} 部",
-                    n_dirs,
-                    g.library.len()
-                )
-            } else {
-                format!("就绪 · 已索引 {} 部", g.library.len())
-            }
-        };
+        if g.phase == SessionPhase::Idle {
+            g.message = idle_message(&g);
+        }
     }
 
+    /// Randomly pick a slate into preview only — does not launch PotPlayer.
+    pub fn roll_preview(&self) {
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle {
+            return;
+        }
+        if g.library.is_empty() {
+            g.message = "片库为空，无法预览".into();
+            return;
+        }
+        let n = g.config.clamp_count(g.ui_count);
+        let chosen = picker::pick(
+            &g.library.files,
+            n,
+            g.config.avoid_recent,
+            &g.history.as_path_set(),
+        );
+        if chosen.is_empty() {
+            g.message = "未能选出影片".into();
+            g.preview_files.clear();
+            return;
+        }
+        g.preview_files = chosen;
+        g.last_errors.clear();
+        g.message = format!(
+            "预览就绪 · {} 部 · 确认后点「开启播放」",
+            g.preview_files.len()
+        );
+    }
+
+    /// Remove one title from the preview slate (before play).
+    pub fn remove_preview_item(&self, index: usize) {
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle || index >= g.preview_files.len() {
+            return;
+        }
+        g.preview_files.remove(index);
+        if g.preview_files.is_empty() {
+            g.message = idle_message(&g);
+        } else {
+            g.message = format!(
+                "预览就绪 · {} 部 · 确认后点「开启播放」",
+                g.preview_files.len()
+            );
+        }
+    }
+
+    /// Launch PotPlayer for the current preview slate only.
     pub fn start(&self) {
         let mut g = self.inner.lock().unwrap();
         if g.phase != SessionPhase::Idle {
             return;
         }
+        if g.preview_files.is_empty() {
+            g.message = "请先「随机预览」生成片单".into();
+            return;
+        }
         g.phase = SessionPhase::Starting;
-        g.message = "正在开启本轮…".into();
+        g.message = "正在开启播放…".into();
         g.last_errors.clear();
         drop(g);
 
@@ -337,15 +392,30 @@ impl SessionHandle {
             potplayer::kill_pids(&pids);
             let mut g = handle.lock().unwrap();
             g.phase = SessionPhase::Idle;
-            g.message = format!("就绪 · 已索引 {} 部", g.library.len());
+            // Keep preview so user can re-open the same slate if they want
+            if g.preview_files.is_empty() {
+                g.message = idle_message(&g);
+            } else {
+                g.message = format!(
+                    "已停止 · 预览仍保留 {} 部，可再「开启播放」或「换一桌」",
+                    g.preview_files.len()
+                );
+            }
         });
     }
 
+    /// Re-roll preview only. If playing, stop players first then new preview (no auto-play).
     pub fn reroll(&self) {
         let mut g = self.inner.lock().unwrap();
-        if g.phase != SessionPhase::Playing && g.phase != SessionPhase::Idle {
+        if g.phase == SessionPhase::Starting || g.phase == SessionPhase::Stopping {
             return;
         }
+        if g.phase == SessionPhase::Idle {
+            drop(g);
+            self.roll_preview();
+            return;
+        }
+        // Playing → stop then preview
         let pids: Vec<u32> = g.items.iter().map(|i| i.pid).collect();
         g.phase = SessionPhase::Stopping;
         g.message = "换一桌中…".into();
@@ -356,15 +426,15 @@ impl SessionHandle {
         thread::spawn(move || {
             if !pids.is_empty() {
                 potplayer::kill_pids(&pids);
-                thread::sleep(std::time::Duration::from_millis(300));
+                thread::sleep(std::time::Duration::from_millis(250));
             }
             {
                 let mut g = handle.lock().unwrap();
-                g.phase = SessionPhase::Starting;
-                g.message = "正在开启本轮…".into();
-                g.last_errors.clear();
+                g.phase = SessionPhase::Idle;
             }
-            run_start(handle);
+            // roll_preview needs Idle
+            let session = SessionHandle { inner: handle };
+            session.roll_preview();
         });
     }
 
@@ -378,22 +448,36 @@ impl SessionHandle {
     }
 }
 
-fn run_start(handle: Arc<Mutex<Inner>>) {
-    let (config, library_files, ui_count, history_paths, avoid) = {
-        let g = handle.lock().unwrap();
-        (
-            g.config.clone(),
-            g.library.files.clone(),
-            g.ui_count,
-            g.history.as_path_set(),
-            g.config.avoid_recent,
+fn idle_message(g: &Inner) -> String {
+    if g.library.is_empty() {
+        if g.config.library_roots().is_empty() {
+            "请先设置片库目录".into()
+        } else {
+            "片库中未找到视频".into()
+        }
+    } else if g.preview_files.is_empty() {
+        format!(
+            "就绪 · 已索引 {} 部 · 先「随机预览」",
+            g.library.len()
         )
+    } else {
+        format!(
+            "预览就绪 · {} 部 · 可「开启播放」",
+            g.preview_files.len()
+        )
+    }
+}
+
+fn run_start(handle: Arc<Mutex<Inner>>) {
+    let (config, chosen) = {
+        let g = handle.lock().unwrap();
+        (g.config.clone(), g.preview_files.clone())
     };
 
-    if library_files.is_empty() {
+    if chosen.is_empty() {
         let mut g = handle.lock().unwrap();
         g.phase = SessionPhase::Idle;
-        g.message = "片库为空，无法开启".into();
+        g.message = "请先「随机预览」生成片单".into();
         return;
     }
 
@@ -407,16 +491,6 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
     };
 
-    let n = config.clamp_count(ui_count);
-    let chosen = picker::pick(&library_files, n, avoid, &history_paths);
-    if chosen.is_empty() {
-        let mut g = handle.lock().unwrap();
-        g.phase = SessionPhase::Idle;
-        g.message = "未能选出影片".into();
-        return;
-    }
-
-    let shortfall = n > chosen.len();
     let (launched, errors) = potplayer::launch_many(&pot, &chosen);
 
     if launched.is_empty() {
@@ -446,13 +520,12 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         let hist_size = g.config.recent_history_size;
         g.history.push_many(&paths, hist_size);
         let _ = g.history.save();
+        // Keep preview in sync with what actually launched
+        g.preview_files = paths.clone();
         g.items = launched;
         g.phase = SessionPhase::Playing;
         g.last_errors = errors;
         let mut msg = format!("播放中 · {} 部", g.items.len());
-        if shortfall {
-            msg.push_str("（片源不足，已全部开出）");
-        }
         if !g.last_errors.is_empty() {
             msg.push_str(" · 部分失败");
         }

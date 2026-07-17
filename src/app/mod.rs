@@ -169,16 +169,22 @@ impl SuijiApp {
             match cmd {
                 TrayCommand::Show => self.show_window(ctx),
                 TrayCommand::StartOrStop => {
-                    let phase = self.session.snapshot().phase;
-                    if phase == SessionPhase::Playing {
+                    let s = self.session.snapshot();
+                    if s.phase == SessionPhase::Playing {
                         self.session.stop();
-                    } else if phase == SessionPhase::Idle {
-                        self.session.start();
+                    } else if s.phase == SessionPhase::Idle {
+                        if s.has_preview {
+                            self.session.start();
+                        } else {
+                            self.session.roll_preview();
+                            self.show_toast("已生成预览，再点一次托盘可开播");
+                        }
                     }
                     self.show_window(ctx);
                 }
                 TrayCommand::Reroll => {
                     self.session.reroll();
+                    self.show_toast("已换一桌预览");
                     self.show_window(ctx);
                 }
                 TrayCommand::StopSession => {
@@ -465,7 +471,7 @@ impl eframe::App for SuijiApp {
                             });
                         });
 
-                    // ── Preview ──
+                    // ── Preview (slate before play / playing set) ──
                     egui::Frame::NONE
                         .inner_margin(egui::Margin {
                             left: 18,
@@ -474,19 +480,28 @@ impl eframe::App for SuijiApp {
                             bottom: 4,
                         })
                         .show(ui, |ui| {
-                            let n = self.session.ui_count();
-                            let (rows, cols) = crate::tiler::rows_cols(n);
+                            let files = &snap.current_files;
+                            let n = if files.is_empty() {
+                                self.session.ui_count()
+                            } else {
+                                files.len()
+                            };
+                            let (rows, cols) = crate::tiler::rows_cols(n.max(1));
+                            let preview_hint = if snap.phase == SessionPhase::Playing {
+                                format!("正在播放 · {rows}×{cols}")
+                            } else if snap.has_preview {
+                                format!("预览片单 · {rows}×{cols} · 未开播")
+                            } else {
+                                format!("本轮预览 · 空 · 点「随机预览」生成 {n} 部")
+                            };
                             ui.label(
-                                RichText::new(format!(
-                                    "本轮预览 · {rows}×{cols} · 避开任务栏"
-                                ))
-                                .size(11.0)
-                                .color(FAINT)
-                                .extra_letter_spacing(0.3),
+                                RichText::new(preview_hint)
+                                    .size(11.0)
+                                    .color(FAINT)
+                                    .extra_letter_spacing(0.3),
                             );
                             ui.add_space(3.0);
 
-                            let files = &snap.current_files;
                             egui::Frame::NONE
                                 .fill(BG_SOFT)
                                 .stroke(Stroke::new(1.0, LINE))
@@ -497,8 +512,6 @@ impl eframe::App for SuijiApp {
                                     let cell_w = ((total_w - gap * (cols as f32 - 1.0))
                                         / cols as f32)
                                         .max(48.0);
-                                    // Larger tiles so preview fills vertical space (less blank under it)
-                                    // ~16:10 aspect, allow up to ~118px tall
                                     let cell_h = (cell_w * 10.0 / 16.0).clamp(78.0, 118.0);
 
                                     for r in 0..rows {
@@ -550,7 +563,71 @@ impl eframe::App for SuijiApp {
                         });
                     }
 
-                    // ── Per-item ops while playing ──
+                    // ── List ops: preview remove OR playing controls ──
+                    if snap.phase == SessionPhase::Idle && snap.has_preview {
+                        ui.add_space(4.0);
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin {
+                                left: 18,
+                                right: 18,
+                                top: 0,
+                                bottom: 2,
+                            })
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("预览片单 · 可剔除后再开播")
+                                        .size(11.0)
+                                        .color(FAINT),
+                                );
+                                ui.add_space(3.0);
+                                egui::ScrollArea::vertical()
+                                    .max_height(120.0)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
+                                        let mut remove_idx: Option<usize> = None;
+                                        for (i, path) in snap.current_files.iter().enumerate() {
+                                            let name = path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| path.display().to_string());
+                                            egui::Frame::NONE
+                                                .fill(BG_SOFT)
+                                                .stroke(Stroke::new(1.0, LINE))
+                                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{}. {}",
+                                                                i + 1,
+                                                                truncate_path(&name, 26)
+                                                            ))
+                                                            .size(12.0)
+                                                            .color(INK),
+                                                        );
+                                                        ui.with_layout(
+                                                            Layout::right_to_left(Align::Center),
+                                                            |ui| {
+                                                                if mini_text_btn(ui, "剔除")
+                                                                    .clicked()
+                                                                {
+                                                                    remove_idx = Some(i);
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                });
+                                            ui.add_space(3.0);
+                                        }
+                                        if let Some(i) = remove_idx {
+                                            self.session.remove_preview_item(i);
+                                            self.fit_height_frames = 4;
+                                            self.show_toast("已从预览中剔除");
+                                        }
+                                    });
+                            });
+                    }
+
                     if snap.phase == SessionPhase::Playing && !snap.items.is_empty() {
                         ui.add_space(4.0);
                         egui::Frame::NONE
@@ -593,17 +670,20 @@ impl eframe::App for SuijiApp {
                                                         ui.with_layout(
                                                             Layout::right_to_left(Align::Center),
                                                             |ui| {
-                                                                if mini_text_btn(ui, "关闭").clicked()
+                                                                if mini_text_btn(ui, "关闭")
+                                                                    .clicked()
                                                                 {
                                                                     close_idx = Some(it.index);
                                                                 }
                                                                 ui.add_space(4.0);
-                                                                if mini_text_btn(ui, "独播").clicked()
+                                                                if mini_text_btn(ui, "独播")
+                                                                    .clicked()
                                                                 {
                                                                     solo_idx = Some(it.index);
                                                                 }
                                                                 ui.add_space(4.0);
-                                                                if mini_text_btn(ui, "置前").clicked()
+                                                                if mini_text_btn(ui, "置前")
+                                                                    .clicked()
                                                                 {
                                                                     focus_idx = Some(it.index);
                                                                 }
@@ -631,7 +711,7 @@ impl eframe::App for SuijiApp {
 
                     ui.add_space(6.0);
 
-                    // ── Actions (tight under preview) ──
+                    // ── Actions: 预览 → 确认播放 ──
                     egui::Frame::NONE
                         .inner_margin(egui::Margin {
                             left: 18,
@@ -645,18 +725,29 @@ impl eframe::App for SuijiApp {
                                 SessionPhase::Starting | SessionPhase::Stopping
                             );
                             let playing = snap.phase == SessionPhase::Playing;
+                            let has_preview = snap.has_preview;
+                            let can_lib =
+                                !snap.library_roots.is_empty() && snap.library_count > 0;
 
-                            let primary = if playing { "关闭本轮" } else { "开启本轮" };
-                            let primary_enabled = !busy
-                                && (playing
-                                    || (!snap.library_roots.is_empty()
-                                        && snap.library_count > 0));
+                            // Primary
+                            let (primary, primary_ok) = if playing {
+                                ("关闭本轮", !busy)
+                            } else if has_preview {
+                                ("开启播放", !busy && can_lib)
+                            } else {
+                                ("随机预览", !busy && can_lib)
+                            };
 
-                            if primary_btn(ui, primary, primary_enabled).clicked() {
+                            if primary_btn(ui, primary, primary_ok).clicked() {
                                 if playing {
                                     self.session.stop();
-                                } else {
+                                } else if has_preview {
                                     self.session.start();
+                                    self.show_toast("正在按预览片单开播…");
+                                } else {
+                                    self.session.roll_preview();
+                                    self.fit_height_frames = 6;
+                                    self.show_toast("已生成预览，确认后点「开启播放」");
                                 }
                             }
 
@@ -664,15 +755,36 @@ impl eframe::App for SuijiApp {
                             ui.horizontal(|ui| {
                                 let w = (ui.available_width() - 8.0) / 2.0;
                                 let reroll_ok = !busy
-                                    && (playing || snap.phase == SessionPhase::Idle)
-                                    && snap.library_count > 0;
-                                if secondary_btn(ui, w, "再来一轮", reroll_ok).clicked() {
+                                    && can_lib
+                                    && (playing || snap.phase == SessionPhase::Idle);
+                                if secondary_btn(ui, w, "换一桌", reroll_ok).clicked() {
                                     self.session.reroll();
+                                    self.fit_height_frames = 6;
+                                    self.show_toast("已换一桌预览（未自动播放）");
                                 }
                                 ui.add_space(8.0);
-                                let stop_ok = !busy && playing;
-                                if secondary_btn(ui, w, "关闭本轮", stop_ok).clicked() {
-                                    self.session.stop();
+                                let right_label = if playing {
+                                    "关闭本轮"
+                                } else if has_preview {
+                                    "再预览"
+                                } else {
+                                    "关闭本轮"
+                                };
+                                let right_ok = if playing {
+                                    !busy
+                                } else if has_preview {
+                                    !busy && can_lib
+                                } else {
+                                    false
+                                };
+                                if secondary_btn(ui, w, right_label, right_ok).clicked() {
+                                    if playing {
+                                        self.session.stop();
+                                    } else if has_preview {
+                                        self.session.roll_preview();
+                                        self.fit_height_frames = 6;
+                                        self.show_toast("已重新预览");
+                                    }
                                 }
                             });
                         });
@@ -982,13 +1094,26 @@ fn load_texture(ctx: &egui::Context, id: &str, path: &Path) -> Option<TextureHan
 
 fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {
     let (text, bg, fg) = match phase {
-        SessionPhase::Idle => ("就绪", BG_SOFT, MUTED),
+        SessionPhase::Idle => {
+            if message.contains("预览") {
+                ("待播放", Color32::from_rgb(0xE7, 0xE0, 0xD6), INK)
+            } else {
+                ("就绪", BG_SOFT, MUTED)
+            }
+        }
         SessionPhase::Starting => ("启动中", Color32::from_rgb(0xE7, 0xE0, 0xD6), INK),
         SessionPhase::Playing => ("播放中", INK, ON_INK),
         SessionPhase::Stopping => ("关闭中", Color32::from_rgb(0xE7, 0xE0, 0xD6), INK),
     };
-    let label = if message.chars().count() < 16 && phase == SessionPhase::Idle {
-        message
+    let label = if message.chars().count() < 18 && phase == SessionPhase::Idle {
+        // Prefer short status from message when preview-ready
+        if message.contains("预览就绪") {
+            "待播放"
+        } else if message.chars().count() < 12 {
+            message
+        } else {
+            text
+        }
     } else {
         text
     };
