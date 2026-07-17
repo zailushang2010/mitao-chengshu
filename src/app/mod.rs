@@ -1411,27 +1411,29 @@ impl SuijiApp {
                                     .stroke(Stroke::new(1.0, LINE))
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
+                                        // One row: 1.  path…          [移除]
                                         ui.horizontal(|ui| {
-                                            ui.vertical(|ui| {
-                                                ui.label(
-                                                    RichText::new(format!("{}.", i + 1))
-                                                        .size(12.0)
-                                                        .color(FAINT),
-                                                );
-                                                ui.label(
+                                            ui.set_min_height(28.0);
+                                            ui.label(
+                                                RichText::new(format!("{}.", i + 1))
+                                                    .size(13.0)
+                                                    .color(FAINT),
+                                            );
+                                            // Leave room for 移除 button (~52) + gap
+                                            let path_w =
+                                                (ui.available_width() - 60.0).max(48.0);
+                                            ui.add_sized(
+                                                Vec2::new(path_w, 20.0),
+                                                egui::Label::new(
                                                     RichText::new(root.as_str())
                                                         .size(13.0)
                                                         .color(INK),
-                                                );
-                                            });
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    if mini_text_btn(ui, "移除").clicked() {
-                                                        remove_idx = Some(i);
-                                                    }
-                                                },
+                                                )
+                                                .truncate(),
                                             );
+                                            if mini_text_btn(ui, "移除").clicked() {
+                                                remove_idx = Some(i);
+                                            }
                                         });
                                     });
                                 ui.add_space(4.0);
