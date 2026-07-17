@@ -23,6 +23,10 @@ fn default_slideshow_interval() -> u8 {
     5
 }
 
+fn default_volume_percent() -> u8 {
+    28
+}
+
 fn default_image_default_count() -> usize {
     9
 }
@@ -77,6 +81,8 @@ pub struct Config {
     pub image_count_min: usize,
     #[serde(default = "default_image_count_max")]
     pub image_count_max: usize,
+    /// Kept for old config.json compatibility only; not used by UI.
+    #[serde(default = "default_volume_percent")]
     pub volume_percent: u8,
     pub avoid_recent: bool,
     pub recent_history_size: usize,

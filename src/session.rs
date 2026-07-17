@@ -602,12 +602,6 @@ impl SessionHandle {
         let _ = potplayer::kill_pid(pid);
     }
 
-    pub fn set_volume(&self, v: u8) {
-        let mut g = self.inner.lock().unwrap();
-        g.config.volume_percent = v.min(100);
-        let _ = crate::config::save(&g.config);
-    }
-
     pub fn set_avoid_recent(&self, v: bool) {
         let mut g = self.inner.lock().unwrap();
         g.config.avoid_recent = v;

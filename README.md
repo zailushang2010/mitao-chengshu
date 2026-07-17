@@ -81,7 +81,6 @@ pwsh -File scripts/pack.ps1
 | `avoid_recent` | 避开最近 |
 | `potplayer_path` | 空则自动探测 |
 | `video_extensions` / `image_extensions` | 后缀 |
-| `volume_percent` | 音量偏好（目前仅保存，未注入 PotPlayer） |
 | `minimize_to_tray` | X 是否进托盘 |
 | `close_session_on_exit` | 退出时是否关本轮 PotPlayer |
 
@@ -89,7 +88,7 @@ pwsh -File scripts/pack.ps1
 
 - 电影播放中可切图片并存，切回可关闭；图片页可「关掉电影」
 - 索引时显示已发现数量；后台/播放中探测已退出的 PotPlayer
-- 音量改为「偏好」诚实文案；图片模式不显示音量
+- 去掉无效的音量滑条（PotPlayer 音量请在播放器内调）
 - 模式切换性能与 UI 手感（toast 叠层、按压反馈等）
 
 ## 开发

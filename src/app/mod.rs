@@ -948,33 +948,6 @@ impl eframe::App for SuijiApp {
                                 });
                             });
 
-                            // Volume: preference only — PotPlayer has no reliable CLI volume API.
-                            if snap.media_mode == MediaMode::Movie {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new("音量偏好").size(13.0).color(MUTED),
-                                    );
-                                    let mut vol = cfg.volume_percent as f32;
-                                    let slider = egui::Slider::new(&mut vol, 0.0..=100.0)
-                                        .show_value(false)
-                                        .trailing_fill(true);
-                                    if ui.add_sized(Vec2::new(150.0, 16.0), slider).changed()
-                                    {
-                                        self.session.set_volume(vol as u8);
-                                    }
-                                    ui.label(
-                                        RichText::new(format!("{}%", cfg.volume_percent))
-                                            .size(12.0)
-                                            .color(MUTED),
-                                    );
-                                });
-                                ui.label(
-                                    RichText::new("仅记在配置里，暂未自动控制 PotPlayer 音量")
-                                        .size(11.0)
-                                        .color(FAINT),
-                                );
-                            }
-
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new("避开最近播放").size(13.0).color(MUTED),
