@@ -53,7 +53,7 @@ cargo build --release
 | `potplayer_path` | 空则自动探测 |
 | `video_extensions` | 识别的后缀列表 |
 | `close_session_on_exit` | 退出程序时是否关掉本轮 PotPlayer |
-| `minimize_to_tray` | 点关闭时是否最小化到托盘（默认 true） |
+| `minimize_to_tray` | 点关闭(X)时是否进托盘（默认 false=退出程序；右上角图标仍可手动收起） |
 
 ## 开发
 

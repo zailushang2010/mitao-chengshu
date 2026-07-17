@@ -579,14 +579,19 @@ impl SuijiApp {
                 let mut to_tray = self.session.config_clone().minimize_to_tray;
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("关闭窗口到托盘")
-                            .size(13.0)
+                        RichText::new("点关闭(X)时进托盘（默认关=退出程序）")
+                            .size(12.5)
                             .color(MUTED),
                     );
                     if toggle(ui, &mut to_tray) {
                         self.session.set_minimize_to_tray(to_tray);
                     }
                 });
+                ui.label(
+                    RichText::new("未开启时：X 退出程序；右上角托盘图标仍可手动收起")
+                        .size(11.0)
+                        .color(FAINT),
+                );
 
                 ui.add_space(8.0);
                 ui.label(

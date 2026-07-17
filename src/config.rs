@@ -19,13 +19,10 @@ pub struct Config {
     pub potplayer_path: String,
     pub video_extensions: Vec<String>,
     pub close_session_on_exit: bool,
-    /// Close button hides to tray instead of quitting.
-    #[serde(default = "default_true")]
+    /// If true, title-bar close (X) hides to tray instead of quitting.
+    /// Default false: X exits the app; use the tray icon button to hide intentionally.
+    #[serde(default)]
     pub minimize_to_tray: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for Config {
@@ -52,7 +49,7 @@ impl Default for Config {
                 ".webm".into(),
             ],
             close_session_on_exit: false,
-            minimize_to_tray: true,
+            minimize_to_tray: false,
         }
     }
 }
