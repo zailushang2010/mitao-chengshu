@@ -26,6 +26,8 @@ pub struct SuijiApp {
     last_phase: SessionPhase,
     /// User hid to tray; don't auto-raise until they ask
     user_hid_to_tray: bool,
+    /// Transient success / info banner: (text, seconds left)
+    toast: Option<(String, f32)>,
 }
 
 impl SuijiApp {
@@ -64,7 +66,12 @@ impl SuijiApp {
             last_fit_count,
             last_phase: SessionPhase::Idle,
             user_hid_to_tray: false,
+            toast: None,
         }
+    }
+
+    fn show_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), 2.4));
     }
 
     fn show_window(&mut self, ctx: &egui::Context) {
@@ -157,6 +164,16 @@ impl SuijiApp {
 
 impl eframe::App for SuijiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let dt = ctx.input(|i| i.unstable_dt);
+        if let Some((_, ref mut left)) = self.toast {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.toast = None;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+
         if self.boot_frames > 0 {
             self.boot_frames -= 1;
             self.show_window(ctx);
@@ -222,6 +239,29 @@ impl eframe::App for SuijiApp {
             .frame(egui::Frame::NONE.fill(BG).inner_margin(0.0))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+
+                // Success / info toast under title bar
+                if let Some((ref msg, left)) = self.toast {
+                    let alpha = (left / 0.35).clamp(0.0, 1.0).min(1.0);
+                    let a = (220.0 * alpha) as u8;
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgba_unmultiplied(28, 25, 23, a))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("✓")
+                                        .size(15.0)
+                                        .color(Color32::from_rgb(0x86, 0xEF, 0xAC)),
+                                );
+                                ui.label(
+                                    RichText::new(msg.as_str())
+                                        .size(14.0)
+                                        .color(ON_INK),
+                                );
+                            });
+                        });
+                }
 
                 // Pack everything in one vertical column — no ScrollArea (it was leaving a tall empty band).
                 let stack = ui.vertical(|ui| {
@@ -604,6 +644,7 @@ impl eframe::App for SuijiApp {
 impl SuijiApp {
     fn settings_modal(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
+        let mut finish_clicked = false;
         egui::Window::new("片库设置")
             .collapsible(false)
             .resizable(true)
@@ -803,9 +844,31 @@ impl SuijiApp {
 
                 ui.add_space(16.0);
                 if primary_btn(ui, "完成", true).clicked() {
-                    self.show_settings = false;
+                    finish_clicked = true;
                 }
             });
+
+        if finish_clicked {
+            // Persist path field even if user skipped「保存路径」
+            let path = self.pot_path_edit.trim().to_string();
+            self.session.set_potplayer_path(path);
+            let cfg = self.session.config_clone();
+            let save_ok = crate::config::save(&cfg).is_ok();
+            open = false;
+            self.fit_height_frames = 4;
+            if save_ok {
+                let roots = cfg.library_roots().len();
+                self.show_toast(format!(
+                    "设置已保存 · {} 个片库 · 数量 {}–{}",
+                    roots, cfg.count_min, cfg.count_max
+                ));
+            } else {
+                self.show_toast("设置未能写入文件，请检查目录权限");
+            }
+        } else if self.show_settings && !open {
+            // Closed via window X — changes were already live-saved
+            self.show_toast("已关闭设置（修改已即时生效）");
+        }
         self.show_settings = open;
     }
 }
