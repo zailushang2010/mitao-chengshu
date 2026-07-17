@@ -27,8 +27,8 @@ pub struct SuijiApp {
     last_phase: SessionPhase,
     /// User hid to tray; don't auto-raise until they ask
     user_hid_to_tray: bool,
-    /// Transient success / info banner: (text, seconds left)
-    toast: Option<(String, f32)>,
+    /// Transient success / info banner
+    toast: Option<ToastState>,
     /// While playing movies, keep panel above PotPlayer
     pin_while_playing: bool,
     window_was_minimized: bool,
@@ -37,7 +37,22 @@ pub struct SuijiApp {
     slide_elapsed: f32,
     slide_paused: bool,
     slide_tex: Option<(PathBuf, TextureHandle)>,
+    /// Previous slide during short crossfade (opacity blend)
+    slide_prev: Option<(PathBuf, TextureHandle)>,
+    /// 0 = fully previous, 1 = fully current
+    slide_fade: f32,
 }
+
+/// Toast life: enter 160ms → hold → exit 180ms (ease-out feel via alpha).
+struct ToastState {
+    msg: String,
+    age: f32,
+    hold: f32,
+}
+
+const TOAST_ENTER: f32 = 0.16;
+const TOAST_EXIT: f32 = 0.18;
+const SLIDE_CROSSFADE: f32 = 0.18;
 
 impl SuijiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, session: SessionHandle) -> Self {
@@ -63,10 +78,11 @@ impl SuijiApp {
         };
         let last_fit_count = session.ui_count();
         let toast = if need_library {
-            Some((
-                "请先添加片库目录（右上角齿轮 · 片库设置）".to_string(),
-                4.5,
-            ))
+            Some(ToastState {
+                msg: "请先添加片库目录（右上角齿轮 · 片库设置）".to_string(),
+                age: 0.0,
+                hold: 4.2,
+            })
         } else {
             None
         };
@@ -90,11 +106,36 @@ impl SuijiApp {
             slide_elapsed: 0.0,
             slide_paused: false,
             slide_tex: None,
+            slide_prev: None,
+            slide_fade: 1.0,
         }
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), 2.4));
+        // Interruptible: replace mid-flight; re-enter from low alpha via age reset.
+        self.toast = Some(ToastState {
+            msg: msg.into(),
+            age: 0.0,
+            hold: 2.0,
+        });
+    }
+
+    fn toast_alpha(t: &ToastState) -> f32 {
+        let enter = TOAST_ENTER;
+        let hold = t.hold;
+        let exit = TOAST_EXIT;
+        if t.age < enter {
+            ease_out_cubic((t.age / enter).clamp(0.0, 1.0))
+        } else if t.age < enter + hold {
+            1.0
+        } else {
+            let u = ((t.age - enter - hold) / exit).clamp(0.0, 1.0);
+            1.0 - ease_out_cubic(u)
+        }
+    }
+
+    fn toast_alive(t: &ToastState) -> bool {
+        t.age < TOAST_ENTER + t.hold + TOAST_EXIT
     }
 
     fn playing_now(&self) -> bool {
@@ -274,7 +315,7 @@ impl SuijiApp {
         });
         if stop {
             self.session.stop();
-            self.slide_tex = None;
+            self.clear_slides();
             self.show_toast("已结束幻灯");
             return;
         }
@@ -282,13 +323,20 @@ impl SuijiApp {
             let n = paths.len() as i32;
             self.slide_index = ((self.slide_index as i32 + step).rem_euclid(n)) as usize;
             self.slide_elapsed = 0.0;
-            self.slide_tex = None;
+            self.begin_slide_change();
         } else if !self.slide_paused {
             self.slide_elapsed += dt;
             if self.slide_elapsed >= interval {
                 self.slide_elapsed = 0.0;
                 self.slide_index = (self.slide_index + 1) % paths.len();
-                self.slide_tex = None;
+                self.begin_slide_change();
+            }
+        }
+        // Crossfade progress
+        if self.slide_fade < 1.0 {
+            self.slide_fade = (self.slide_fade + dt / SLIDE_CROSSFADE).min(1.0);
+            if self.slide_fade >= 1.0 {
+                self.slide_prev = None;
             }
         }
         // Load texture for current
@@ -305,6 +353,22 @@ impl SuijiApp {
             }
         }
         ctx.request_repaint();
+    }
+
+    /// Keep previous frame for short crossfade (prevents hard cut).
+    fn begin_slide_change(&mut self) {
+        if let Some(cur) = self.slide_tex.take() {
+            self.slide_prev = Some(cur);
+            self.slide_fade = 0.0;
+        } else {
+            self.slide_fade = 1.0;
+        }
+    }
+
+    fn clear_slides(&mut self) {
+        self.slide_tex = None;
+        self.slide_prev = None;
+        self.slide_fade = 1.0;
     }
 
     fn draw_slideshow_overlay(&mut self, ctx: &egui::Context, paths: &[PathBuf], interval: u8) {
@@ -324,13 +388,17 @@ impl SuijiApp {
                     ui.painter()
                         .rect_filled(screen, 0.0, Color32::from_rgb(12, 12, 14));
 
-                    if let Some((_, tex)) = &self.slide_tex {
+                    let paint_slide = |ui: &mut egui::Ui, tex: &TextureHandle, alpha: f32| {
+                        if alpha <= 0.01 {
+                            return;
+                        }
                         let size = tex.size_vec2();
                         let fit = (screen.width() / size.x)
                             .min(screen.height() / size.y)
                             .min(1.5);
                         let draw = size * fit;
                         let rect = egui::Rect::from_center_size(screen.center(), draw);
+                        let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
                         ui.painter().image(
                             tex.id(),
                             rect,
@@ -338,9 +406,17 @@ impl SuijiApp {
                                 egui::pos2(0.0, 0.0),
                                 egui::pos2(1.0, 1.0),
                             ),
-                            Color32::WHITE,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, a),
                         );
-                    } else {
+                    };
+
+                    let fade = ease_out_cubic(self.slide_fade.clamp(0.0, 1.0));
+                    if let Some((_, tex)) = &self.slide_prev {
+                        paint_slide(ui, tex, 1.0 - fade);
+                    }
+                    if let Some((_, tex)) = &self.slide_tex {
+                        paint_slide(ui, tex, if self.slide_prev.is_some() { fade } else { 1.0 });
+                    } else if self.slide_prev.is_none() {
                         ui.painter().text(
                             screen.center(),
                             egui::Align2::CENTER_CENTER,
@@ -350,9 +426,9 @@ impl SuijiApp {
                         );
                     }
 
-                    // HUD
+                    // HUD — avoid ←/→ glyphs (CJK font tofu risk)
                     let hud = format!(
-                        "{}/{}  ·  {}s  ·  {}  ·  空格暂停  ←/→ 切换  Esc 结束",
+                        "{}/{}  ·  {}s  ·  {}  ·  空格暂停  左右切换  Esc 结束",
                         self.slide_index + 1,
                         n,
                         interval,
@@ -378,11 +454,11 @@ impl SuijiApp {
                             if x < 0.28 {
                                 self.slide_index = (self.slide_index + n - 1) % n;
                                 self.slide_elapsed = 0.0;
-                                self.slide_tex = None;
+                                self.begin_slide_change();
                             } else if x > 0.72 {
                                 self.slide_index = (self.slide_index + 1) % n;
                                 self.slide_elapsed = 0.0;
-                                self.slide_tex = None;
+                                self.begin_slide_change();
                             } else {
                                 self.slide_paused = !self.slide_paused;
                             }
@@ -497,9 +573,9 @@ impl SuijiApp {
 impl eframe::App for SuijiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let dt = ctx.input(|i| i.unstable_dt);
-        if let Some((_, ref mut left)) = self.toast {
-            *left -= dt;
-            if *left <= 0.0 {
+        if let Some(ref mut t) = self.toast {
+            t.age += dt;
+            if !Self::toast_alive(t) {
                 self.toast = None;
             } else {
                 ctx.request_repaint();
@@ -556,7 +632,7 @@ impl eframe::App for SuijiApp {
                 self.slide_index = 0;
                 self.slide_elapsed = 0.0;
                 self.slide_paused = false;
-                self.slide_tex = None;
+                self.clear_slides();
             }
             self.tick_slideshow(
                 ctx,
@@ -567,18 +643,18 @@ impl eframe::App for SuijiApp {
         } else if image_wall {
             if self.last_phase != SessionPhase::Playing {
                 self.slide_index = 0;
-                self.slide_tex = None;
+                self.clear_slides();
             }
             // Esc ends wall
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.session.stop();
-                self.slide_tex = None;
+                self.clear_slides();
                 self.show_toast("已关闭平铺墙");
             }
             ctx.request_repaint();
         } else if self.last_phase == SessionPhase::Playing && snap.media_mode == MediaMode::Image
         {
-            self.slide_tex = None;
+            self.clear_slides();
         }
         self.last_phase = snap.phase;
 
@@ -597,16 +673,22 @@ impl eframe::App for SuijiApp {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
 
-                // Success / info toast under title bar
-                // Note: do not use "✓" as text — CJK primary font often lacks it and
-                // renders a green tofu box on the left (see mode-switch toasts).
-                if let Some((ref msg, left)) = self.toast {
-                    let alpha = (left / 0.35).clamp(0.0, 1.0).min(1.0);
+                // Success / info toast — enter/hold/exit alpha (interruptible replace)
+                if let Some(ref toast) = self.toast {
+                    let alpha = Self::toast_alpha(toast);
                     let a = (220.0 * alpha) as u8;
                     let icon_a = (255.0 * alpha) as u8;
+                    let text_a = (255.0 * alpha) as u8;
+                    // Slight slide from top via top margin (spatial consistency)
+                    let top_pad = (10.0 * (1.0 - alpha)).round() as i8;
                     egui::Frame::NONE
                         .fill(Color32::from_rgba_unmultiplied(28, 25, 23, a))
-                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .inner_margin(egui::Margin {
+                            left: 14,
+                            right: 14,
+                            top: 10 + top_pad.max(0) as i8,
+                            bottom: 10,
+                        })
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.add_space(2.0);
@@ -619,9 +701,14 @@ impl eframe::App for SuijiApp {
                                 );
                                 ui.add_space(6.0);
                                 ui.label(
-                                    RichText::new(msg.as_str())
-                                        .size(14.0)
-                                        .color(ON_INK),
+                                    RichText::new(toast.msg.as_str()).size(14.0).color(
+                                        Color32::from_rgba_unmultiplied(
+                                            ON_INK.r(),
+                                            ON_INK.g(),
+                                            ON_INK.b(),
+                                            text_a,
+                                        ),
+                                    ),
                                 );
                             });
                         });
@@ -646,7 +733,7 @@ impl eframe::App for SuijiApp {
                                     snap.media_mode == MediaMode::Movie,
                                     || {
                                         self.session.set_media_mode(MediaMode::Movie);
-                                        self.slide_tex = None;
+                                        self.clear_slides();
                                         self.textures.clear();
                                         self.fit_height_frames = 6;
                                         self.show_toast("已切换到电影模式");
@@ -659,7 +746,7 @@ impl eframe::App for SuijiApp {
                                     snap.media_mode == MediaMode::Image,
                                     || {
                                         self.session.set_media_mode(MediaMode::Image);
-                                        self.slide_tex = None;
+                                        self.clear_slides();
                                         self.textures.clear();
                                         self.fit_height_frames = 6;
                                         self.show_toast("已切换到图片模式 · 预览后开启幻灯");
@@ -1113,14 +1200,14 @@ impl eframe::App for SuijiApp {
                             if primary_btn(ui, primary, primary_ok).clicked() {
                                 if playing {
                                     self.session.stop();
-                                    self.slide_tex = None;
+                                    self.clear_slides();
                                 } else if has_preview {
                                     self.session.start();
                                     if is_img {
                                         self.slide_index = 0;
                                         self.slide_elapsed = 0.0;
                                         self.slide_paused = false;
-                                        self.slide_tex = None;
+                                        self.clear_slides();
                                         let style = self.session.config_clone().image_play_style;
                                         self.show_toast(match style {
                                             ImagePlayStyle::Slideshow => "幻灯开始 · Esc 结束",
@@ -1653,15 +1740,20 @@ fn bound_stepper(
 fn small_step_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let size = Vec2::new(34.0, 34.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let stroke = if resp.hovered() {
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let stroke = if pressed || resp.hovered() {
         Stroke::new(1.0, MUTED)
     } else {
         Stroke::new(1.0, LINE_STRONG)
     };
+    if pressed {
+        ui.painter().rect_filled(draw, 2.0, BG_SOFT);
+    }
     ui.painter()
-        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
     ui.painter().text(
-        rect.center(),
+        draw.center(),
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(16.0),
@@ -1688,6 +1780,20 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
     resp.clicked()
 }
 
+/// Visual press: shrink draw rect ~3% (scale 0.97 feel) without changing layout.
+fn press_draw_rect(rect: egui::Rect, resp: &egui::Response, enabled: bool) -> egui::Rect {
+    if enabled && resp.is_pointer_button_down_on() {
+        rect.shrink(1.5)
+    } else {
+        rect
+    }
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
 fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     let width = ui.available_width();
     let height = 48.0;
@@ -1695,16 +1801,20 @@ fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     if !enabled {
         resp = resp.on_disabled_hover_text("请先完成片库设置并确保有视频");
     }
+    let pressed = enabled && resp.is_pointer_button_down_on();
     let bg = if !enabled {
         Color32::from_rgb(0xA8, 0xA2, 0x9E)
+    } else if pressed {
+        Color32::from_rgb(0x14, 0x12, 0x11)
     } else if resp.hovered() {
         Color32::from_rgb(0x29, 0x25, 0x24)
     } else {
         INK
     };
-    ui.painter().rect_filled(rect, 0.0, bg);
+    let draw = press_draw_rect(rect, &resp, enabled);
+    ui.painter().rect_filled(draw, 0.0, bg);
     ui.painter().text(
-        rect.center(),
+        draw.center(),
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(16.0),
@@ -1726,38 +1836,52 @@ fn mini_text_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     );
     let size = galley.size() + pad * 2.0;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let stroke = if resp.hovered() {
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let stroke = if pressed {
+        Stroke::new(1.0, INK)
+    } else if resp.hovered() {
         Stroke::new(1.0, INK)
     } else {
         Stroke::new(1.0, FAINT)
     };
-    ui.painter()
-        .rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
-    if resp.hovered() {
-        ui.painter().rect_filled(rect, 1.0, BG_SOFT);
+    if pressed {
+        ui.painter()
+            .rect_filled(draw, 1.0, Color32::from_rgb(0xE7, 0xE0, 0xD6));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(draw, 1.0, BG_SOFT);
     }
-    ui.painter().galley(
-        egui::pos2(rect.left() + pad.x, rect.top() + pad.y),
-        galley,
-        INK,
+    ui.painter()
+        .rect_stroke(draw, 1.0, stroke, egui::StrokeKind::Inside);
+    let galley_pos = egui::pos2(
+        draw.center().x - galley.size().x * 0.5,
+        draw.center().y - galley.size().y * 0.5,
     );
+    ui.painter().galley(galley_pos, galley, INK);
     resp
 }
 
 fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+    let pressed = enabled && resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, enabled);
     let stroke = if !enabled {
         Stroke::new(1.0, LINE)
+    } else if pressed {
+        Stroke::new(1.2, INK)
     } else if resp.hovered() {
         Stroke::new(1.0, MUTED)
     } else {
         Stroke::new(1.0, FAINT)
     };
     let fg = if enabled { INK } else { FAINT };
+    if pressed {
+        ui.painter().rect_filled(draw, 0.0, BG_SOFT);
+    }
     ui.painter()
-        .rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 0.0, stroke, egui::StrokeKind::Inside);
     ui.painter().text(
-        rect.center(),
+        draw.center(),
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(14.0),
@@ -1793,24 +1917,32 @@ fn icon_btn_toggle(ui: &mut egui::Ui, kind: IconKind, tip: &str, active: bool) -
     let size = Vec2::new(40.0, 40.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let hovered = resp.hovered();
-    let stroke = if active || hovered {
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let stroke = if pressed || active || hovered {
         Stroke::new(1.2, INK)
     } else {
         Stroke::new(1.0, LINE_STRONG)
     };
-    let fill = if active {
+    let fill = if pressed {
+        Color32::from_rgb(0xD6, 0xD0, 0xC6)
+    } else if active {
         Color32::from_rgb(0xE7, 0xE0, 0xD6)
     } else if hovered {
         BG_SOFT
     } else {
         BG
     };
-    ui.painter().rect_filled(rect, 2.0, fill);
+    ui.painter().rect_filled(draw, 2.0, fill);
     ui.painter()
-        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
 
-    let c = rect.center();
-    let ink = if active || hovered { INK } else { MUTED };
+    let c = draw.center();
+    let ink = if active || hovered || pressed {
+        INK
+    } else {
+        MUTED
+    };
     let s = Stroke::new(1.4, ink);
 
     match kind {
