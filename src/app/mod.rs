@@ -36,9 +36,6 @@ pub struct SuijiApp {
     boot_frames: u8,
     /// After size settle, center once on the monitor (boot / first show).
     need_center: bool,
-    /// Nudge window height to content for a few frames (rare; landscape is mostly fixed).
-    fit_height_frames: u8,
-    last_fit_count: usize,
     last_media_mode: MediaMode,
     last_phase: SessionPhase,
     /// User hid to tray; don't auto-raise until they ask
@@ -103,6 +100,7 @@ impl SuijiApp {
         let cfg0 = session.config_clone();
         let pot_path_edit = cfg0.potplayer_path.clone();
         let sidebar_open = cfg0.workbench_sidebar_open;
+        let pin_while_playing = cfg0.pin_while_playing;
         let tray = match TrayService::try_new(cc.egui_ctx.clone()) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -115,7 +113,6 @@ impl SuijiApp {
             let s = session.snapshot();
             s.library_roots.is_empty() || s.library_count == 0
         };
-        let last_fit_count = session.ui_count();
         let last_media_mode = session.media_mode();
         let toast = if need_library {
             Some(ToastState {
@@ -137,13 +134,11 @@ impl SuijiApp {
             force_quit: false,
             boot_frames: 8,
             need_center: true,
-            fit_height_frames: 0,
-            last_fit_count,
             last_media_mode,
             last_phase: SessionPhase::Idle,
             user_hid_to_tray: false,
             toast,
-            pin_while_playing: true,
+            pin_while_playing,
             pin_level_applied: false,
             window_was_minimized: false,
             // Restore workbench rail; snap vis so first frame matches config (no flash).
@@ -207,8 +202,8 @@ impl SuijiApp {
     fn show_window(&mut self, ctx: &egui::Context) {
         self.user_hid_to_tray = false;
         self.window_was_minimized = false;
-        // Pin only matters for movie + PotPlayer
-        if self.playing_now() && self.pin_while_playing && !self.is_image_mode() {
+        let snap = self.session.snapshot();
+        if self.should_stay_above_players(snap.phase, snap.movie_in_background) {
             crate::tray::force_show_and_pin();
             self.apply_window_level(ctx, true);
         } else {
@@ -243,42 +238,48 @@ impl SuijiApp {
         crate::tray::set_main_window_topmost(on);
     }
 
-    /// Pin above players while Playing movies, but release on minimize so taskbar works.
-    fn sync_play_pin_state(&mut self, ctx: &egui::Context, phase: SessionPhase) {
+    /// PotPlayers we launched are still on screen (foreground play or parked under 图片).
+    fn should_stay_above_players(&self, phase: SessionPhase, movie_in_background: bool) -> bool {
+        if self.user_hid_to_tray {
+            return false;
+        }
+        // 并存：切到图片后电影仍在播时，面板必须可点（不依赖图钉开关）
+        if movie_in_background {
+            return true;
+        }
+        // 纯电影播放：尊重「播放时置顶」
+        self.pin_while_playing && !self.is_image_mode() && phase == SessionPhase::Playing
+    }
+
+    /// Raise/pin above our PotPlayers; release on minimize / tray / pin-off / no pots.
+    fn sync_play_pin_state(
+        &mut self,
+        ctx: &egui::Context,
+        phase: SessionPhase,
+        movie_in_background: bool,
+    ) {
         let minimized = ctx.input(|i| i.viewport().minimized == Some(true));
 
-        // Image slideshow is in-app — no sticky topmost needed
-        let want_pin = !self.is_image_mode()
-            && phase == SessionPhase::Playing
-            && !self.user_hid_to_tray
-            && self.pin_while_playing
-            && !minimized;
+        let want_pin =
+            self.should_stay_above_players(phase, movie_in_background) && !minimized;
 
         if !want_pin {
-            // Drop pin when idle / image / tray / user turned off / minimized
-            if self.pin_level_applied
-                || crate::tray::pin_desired()
-                || self.last_phase == SessionPhase::Playing
-                || !self.pin_while_playing
-            {
+            if self.pin_level_applied || crate::tray::pin_desired() {
                 self.apply_window_level(ctx, false);
             }
             self.window_was_minimized = minimized;
             return;
         }
 
-        // Playing + pin enabled + visible
+        // Pots running + pin enabled + not minimized
         if self.window_was_minimized {
-            // Restored from taskbar — raise above PotPlayers and pin again
             crate::tray::force_show_and_pin();
             self.window_was_minimized = false;
-            // Force winit re-apply even if it already thought we were topmost
             self.pin_level_applied = false;
             self.apply_window_level(ctx, true);
         } else if !self.pin_level_applied || !crate::tray::pin_desired() {
             self.apply_window_level(ctx, true);
         } else {
-            // HWND may have been cleared by a flash-raise; re-assert z-order cheaply
             crate::tray::set_main_window_topmost(true);
         }
     }
@@ -457,7 +458,7 @@ impl eframe::App for SuijiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        self.sync_play_pin_state(ctx, snap.phase);
+        self.sync_play_pin_state(ctx, snap.phase, snap.movie_in_background);
 
         // Image play: slideshow timer / wall keys
         let image_playing = snap.media_mode == MediaMode::Image
@@ -501,18 +502,11 @@ impl eframe::App for SuijiApp {
         self.ensure_thumbs(&snap.current_files, ctx);
         let cfg = self.session.config_clone();
 
-        // Count / mode changes and window height:
-        // Mode switch often changes ui_count (movie vs image defaults) — must NOT
-        // thrash InnerSize for 6 frames, or the window looks like it "reloads".
-        let count_now = self.session.ui_count();
+        // Workbench is fixed-size (user may resize). Do NOT auto-InnerSize on
+        // mode/count change — pin icon / ui_count / grid would creep the window
+        // a few pixels every switch.
         if snap.media_mode != self.last_media_mode {
             self.last_media_mode = snap.media_mode;
-            self.last_fit_count = count_now;
-            // One gentle remeasure after layout settles (pin row may appear/disappear).
-            self.fit_height_frames = 1;
-        } else if count_now != self.last_fit_count {
-            self.last_fit_count = count_now;
-            self.fit_height_frames = 3;
         }
 
         // Toast as overlay — does not push content or resize the window.
@@ -562,7 +556,7 @@ impl eframe::App for SuijiApp {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
 
                 // Workbench chrome: compact single-row toolbar (not magazine title stack).
-                let stack = ui.vertical(|ui| {
+                ui.vertical(|ui| {
                     // ── Toolbar ──
                     egui::Frame::NONE
                         .fill(Color32::from_rgb(0xF7, 0xF3, 0xEC))
@@ -603,6 +597,16 @@ impl eframe::App for SuijiApp {
                                     || {
                                         self.session.set_media_mode(MediaMode::Movie);
                                         self.clear_slides();
+                                        // Bring panel back if pots still running
+                                        let s = self.session.snapshot();
+                                        if self.should_stay_above_players(
+                                            s.phase,
+                                            s.movie_in_background,
+                                        ) {
+                                            crate::tray::force_show_and_pin();
+                                            self.pin_level_applied = false;
+                                            self.apply_window_level(ctx, true);
+                                        }
                                     },
                                 );
                                 mode_chip(
@@ -612,7 +616,17 @@ impl eframe::App for SuijiApp {
                                     || {
                                         self.session.set_media_mode(MediaMode::Image);
                                         self.clear_slides();
-                                        self.apply_window_level(ctx, false);
+                                        // Parked PotPlayers steal z-order — keep panel usable
+                                        // while user browses images (plan A 并存).
+                                        let s = self.session.snapshot();
+                                        if s.movie_in_background {
+                                            // Must surface above parked PotPlayers or UI is unusable
+                                            crate::tray::force_show_and_pin();
+                                            self.pin_level_applied = false;
+                                            self.apply_window_level(ctx, true);
+                                        } else {
+                                            self.apply_window_level(ctx, false);
+                                        }
                                     },
                                 );
 
@@ -731,33 +745,49 @@ impl eframe::App for SuijiApp {
                                             self.hide_to_tray(ctx);
                                         }
                                     }
-                                    if snap.media_mode == MediaMode::Movie {
-                                        let pin_tip = if self.pin_while_playing {
+                                    // Pin control when pots matter (movie play or parked under 图片)
+                                    if snap.media_mode == MediaMode::Movie
+                                        || snap.movie_in_background
+                                    {
+                                        let pin_forced = snap.movie_in_background;
+                                        let pin_tip = if pin_forced {
+                                            "电影后台播放中：面板保持置顶以便操作"
+                                        } else if self.pin_while_playing {
                                             "播放时置顶：开（点此关闭）"
                                         } else {
                                             "播放时置顶：关（点此开启）"
                                         };
+                                        let pin_visual = pin_forced || self.pin_while_playing;
                                         if icon_btn_toggle(
                                             ui,
                                             IconKind::Pin,
                                             pin_tip,
-                                            self.pin_while_playing,
+                                            pin_visual,
                                         )
                                         .clicked()
                                         {
-                                            self.pin_while_playing = !self.pin_while_playing;
-                                            if !self.pin_while_playing {
-                                                self.apply_window_level(ctx, false);
-                                                self.show_toast("已关闭播放时置顶");
-                                            } else {
-                                                if self.playing_now() && !self.user_hid_to_tray {
-                                                    crate::tray::force_show_and_pin();
-                                                    self.pin_level_applied = false;
-                                                    self.apply_window_level(ctx, true);
-                                                }
+                                            if pin_forced {
                                                 self.show_toast(
-                                                    "已开启播放时置顶（最小化时会自动取消）",
+                                                    "电影仍在后台时需保持置顶，否则无法点到本界面",
                                                 );
+                                            } else {
+                                                self.pin_while_playing = !self.pin_while_playing;
+                                                self.session
+                                                    .set_pin_while_playing(self.pin_while_playing);
+                                                if !self.pin_while_playing {
+                                                    self.apply_window_level(ctx, false);
+                                                    self.show_toast("已关闭播放时置顶");
+                                                } else {
+                                                    if self.playing_now() && !self.user_hid_to_tray
+                                                    {
+                                                        crate::tray::force_show_and_pin();
+                                                        self.pin_level_applied = false;
+                                                        self.apply_window_level(ctx, true);
+                                                    }
+                                                    self.show_toast(
+                                                        "已开启播放时置顶（最小化时会自动取消）",
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -875,24 +905,40 @@ impl eframe::App for SuijiApp {
                                             ui.add_space(4.0);
 
                                             // Actions up front — left column is the control rail
-                                            let busy = matches!(
-                                                snap.phase,
-                                                SessionPhase::Starting | SessionPhase::Stopping
-                                            );
+                                            let starting = snap.phase == SessionPhase::Starting;
+                                            let stopping = snap.phase == SessionPhase::Stopping;
+                                            let busy = starting || stopping;
                                             let playing = snap.phase == SessionPhase::Playing;
                                             let has_preview = snap.has_preview;
                                             let can_lib = !snap.library_roots.is_empty()
                                                 && snap.library_count > 0;
                                             let is_img = snap.media_mode == MediaMode::Image;
-                                            let (primary, primary_ok) = if playing {
+                                            let is_wall = is_img
+                                                && snap.image_play_style
+                                                    == ImagePlayStyle::Wall;
+                                            let (primary, primary_ok) = if starting {
+                                                ("取消开启", true)
+                                            } else if playing {
                                                 (
-                                                    if is_img { "关闭幻灯" } else { "关闭本轮" },
+                                                    if is_img {
+                                                        if is_wall {
+                                                            "关闭平铺"
+                                                        } else {
+                                                            "关闭幻灯"
+                                                        }
+                                                    } else {
+                                                        "关闭本轮"
+                                                    },
                                                     !busy,
                                                 )
                                             } else if has_preview {
                                                 (
                                                     if is_img {
-                                                        "开启幻灯"
+                                                        if is_wall {
+                                                            "开启平铺墙"
+                                                        } else {
+                                                            "开启幻灯"
+                                                        }
                                                     } else {
                                                         "开启播放"
                                                     },
@@ -903,7 +949,10 @@ impl eframe::App for SuijiApp {
                                             };
 
                                             if primary_btn(ui, primary, primary_ok).clicked() {
-                                                if playing {
+                                                if starting {
+                                                    self.session.stop();
+                                                    self.show_toast("已取消开启");
+                                                } else if playing {
                                                     self.session.stop();
                                                     self.clear_slides();
                                                 } else if has_preview {
@@ -1115,6 +1164,7 @@ impl eframe::App for SuijiApp {
                                                 // Full-height empty card — left rail stays solid, not hollow
                                                 let count = self.session.ui_count();
                                                 let unit = if is_img { "张" } else { "部" };
+                                                let lib_word = if is_img { "图库" } else { "片库" };
                                                 let roots_n = snap.library_roots.len();
                                                 egui::Frame::NONE
                                                     .fill(BG_SOFT)
@@ -1126,22 +1176,26 @@ impl eframe::App for SuijiApp {
                                                         ui.spacing_mut().item_spacing.y = 8.0;
 
                                                         ui.label(
-                                                            RichText::new("本轮片单")
-                                                                .size(13.0)
-                                                                .color(INK)
-                                                                .strong(),
+                                                            RichText::new(if is_img {
+                                                                "本轮图集"
+                                                            } else {
+                                                                "本轮片单"
+                                                            })
+                                                            .size(13.0)
+                                                            .color(INK)
+                                                            .strong(),
                                                         );
                                                         ui.label(
                                                             RichText::new(if roots_n == 0 {
-                                                                "尚未添加片库目录".to_string()
+                                                                format!("尚未添加{lib_word}目录")
                                                             } else if snap.indexing {
                                                                 format!(
-                                                                    "索引中… 片库 {} 个目录",
+                                                                    "索引中… {lib_word} {} 个目录",
                                                                     roots_n
                                                                 )
                                                             } else {
                                                                 format!(
-                                                                    "片库 {} {unit} · 将抽 {} {unit}",
+                                                                    "{lib_word} {} {unit} · 将抽 {} {unit}",
                                                                     snap.library_count, count
                                                                 )
                                                             })
@@ -1158,6 +1212,12 @@ impl eframe::App for SuijiApp {
                                                                 "1. 右上角齿轮 → 添加片库",
                                                                 "2. 调整本轮数量",
                                                                 "3. 点「随机预览」生成片单",
+                                                            ]
+                                                        } else if is_img {
+                                                            &[
+                                                                "1. 点上方「随机预览」",
+                                                                "2. 主区查看封面网格",
+                                                                "3. 确认后点「开启幻灯」",
                                                             ]
                                                         } else {
                                                             &[
@@ -1342,26 +1402,6 @@ impl eframe::App for SuijiApp {
                     );
                 });
 
-                // Landscape is fixed-size by default; rare fit only (settings close etc.).
-                // After resize, re-center so the window does not stick to a corner.
-                if self.fit_height_frames > 0 && !self.show_settings {
-                    let used_h = stack.response.rect.height().ceil() + 4.0;
-                    let w = ctx.input(|i| {
-                        i.viewport()
-                            .inner_rect
-                            .map(|r| r.width())
-                            .unwrap_or(1024.0)
-                    });
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                        w.clamp(720.0, 1440.0),
-                        used_h.clamp(480.0, 960.0),
-                    )));
-                    self.fit_height_frames = self.fit_height_frames.saturating_sub(1);
-                    if self.fit_height_frames == 0 {
-                        self.need_center = true;
-                    }
-                    ctx.request_repaint();
-                }
             });
 
         // Settings open/close animation (ease-out open 200ms, faster close 120ms)

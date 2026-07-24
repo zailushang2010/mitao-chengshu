@@ -71,8 +71,11 @@ pub struct Config {
     #[serde(default)]
     pub media_mode: MediaMode,
     /// Movie: how many to pick per round (legacy field names kept).
+    #[serde(default = "default_movie_default_count")]
     pub default_count: usize,
+    #[serde(default = "default_movie_count_min")]
     pub count_min: usize,
+    #[serde(default = "default_movie_count_max")]
     pub count_max: usize,
     /// Image: separate pick count — not shared with movies.
     #[serde(default = "default_image_default_count")]
@@ -84,9 +87,13 @@ pub struct Config {
     /// Kept for old config.json compatibility only; not used by UI.
     #[serde(default = "default_volume_percent")]
     pub volume_percent: u8,
+    #[serde(default = "default_avoid_recent")]
     pub avoid_recent: bool,
+    #[serde(default = "default_recent_history_size")]
     pub recent_history_size: usize,
+    #[serde(default)]
     pub potplayer_path: String,
+    #[serde(default = "default_video_extensions")]
     pub video_extensions: Vec<String>,
     #[serde(default = "default_image_extensions")]
     pub image_extensions: Vec<String>,
@@ -96,6 +103,7 @@ pub struct Config {
     /// Slideshow or tile wall for image mode.
     #[serde(default)]
     pub image_play_style: ImagePlayStyle,
+    #[serde(default)]
     pub close_session_on_exit: bool,
     /// If true, title-bar close (X) hides to tray instead of quitting.
     #[serde(default)]
@@ -107,13 +115,49 @@ pub struct Config {
     /// Workbench ops rail open (persisted across launches).
     #[serde(default = "default_workbench_sidebar_open")]
     pub workbench_sidebar_open: bool,
+    /// Keep control panel above PotPlayers while movie session is active.
+    #[serde(default = "default_pin_while_playing")]
+    pub pin_while_playing: bool,
 }
 
 fn default_tile_monitor_index() -> i32 {
     -1
 }
 
+fn default_movie_default_count() -> usize {
+    6
+}
+fn default_movie_count_min() -> usize {
+    1
+}
+fn default_movie_count_max() -> usize {
+    16
+}
+fn default_avoid_recent() -> bool {
+    true
+}
+fn default_recent_history_size() -> usize {
+    40
+}
+fn default_video_extensions() -> Vec<String> {
+    vec![
+        ".mkv".into(),
+        ".mp4".into(),
+        ".avi".into(),
+        ".ts".into(),
+        ".m2ts".into(),
+        ".wmv".into(),
+        ".mov".into(),
+        ".flv".into(),
+        ".webm".into(),
+    ]
+}
+
 fn default_workbench_sidebar_open() -> bool {
+    true
+}
+
+fn default_pin_while_playing() -> bool {
     true
 }
 
@@ -137,9 +181,9 @@ impl Default for Config {
             library_paths: Vec::new(),
             image_library_paths: Vec::new(),
             media_mode: MediaMode::Movie,
-            default_count: 6,
-            count_min: 1,
-            count_max: 16,
+            default_count: default_movie_default_count(),
+            count_min: default_movie_count_min(),
+            count_max: default_movie_count_max(),
             image_default_count: default_image_default_count(),
             image_count_min: default_image_count_min(),
             image_count_max: default_image_count_max(),
@@ -147,17 +191,7 @@ impl Default for Config {
             avoid_recent: true,
             recent_history_size: 40,
             potplayer_path: String::new(),
-            video_extensions: vec![
-                ".mkv".into(),
-                ".mp4".into(),
-                ".avi".into(),
-                ".ts".into(),
-                ".m2ts".into(),
-                ".wmv".into(),
-                ".mov".into(),
-                ".flv".into(),
-                ".webm".into(),
-            ],
+            video_extensions: default_video_extensions(),
             image_extensions: default_image_extensions(),
             slideshow_interval_secs: 5,
             image_play_style: ImagePlayStyle::Slideshow,
@@ -165,6 +199,7 @@ impl Default for Config {
             minimize_to_tray: false,
             tile_monitor_index: default_tile_monitor_index(),
             workbench_sidebar_open: default_workbench_sidebar_open(),
+            pin_while_playing: default_pin_while_playing(),
         }
     }
 }

@@ -132,6 +132,7 @@ impl TrayService {
         std::thread::spawn(move || {
             let icon_rx = TrayIconEvent::receiver();
             while let Ok(ev) = icon_rx.recv() {
+                // Only Up (or DoubleClick): Down+Up both firing causes double raise storms.
                 let show = match ev {
                     TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
@@ -140,10 +141,6 @@ impl TrayService {
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
-                        ..
-                    } => true,
-                    TrayIconEvent::Click {
-                        button: MouseButton::Left,
                         ..
                     } => true,
                     _ => false,

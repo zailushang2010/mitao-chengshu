@@ -116,6 +116,8 @@ struct Inner {
     geometry_guard: bool,
     /// Assigned grid cell per PID (source of truth for enforcement).
     tile_targets: std::collections::HashMap<u32, tiler::Rect>,
+    /// Bumped to cancel in-flight `run_start` (mode switch / 取消开启).
+    play_gen: u64,
 }
 
 impl Inner {
@@ -260,13 +262,14 @@ impl SessionHandle {
             image_preview: Vec::new(),
             items: Vec::new(),
             parked_movie: None,
-            message: "就绪 · 先「随机预览」再「开启播放」".into(),
+            message: "就绪 · 先「随机预览」再确认开启".into(),
             last_errors: Vec::new(),
             ui_count,
             scan_found: Arc::new(AtomicUsize::new(0)),
             scan_cancel: Arc::new(AtomicBool::new(false)),
             geometry_guard: false,
             tile_targets: std::collections::HashMap::new(),
+            play_gen: 0,
         };
         // Initial index for active mode only (keeps other mode for first switch).
         let roots = inner.config.roots_for(mode);
@@ -382,6 +385,8 @@ impl SessionHandle {
                         g.phase = SessionPhase::Idle;
                     }
                     SessionPhase::Starting | SessionPhase::Stopping => {
+                        // Invalidate in-flight run_start so it will kill launched pots
+                        g.play_gen = g.play_gen.wrapping_add(1);
                         pids_to_kill = g
                             .items
                             .iter()
@@ -756,9 +761,13 @@ impl SessionHandle {
     }
 
     pub fn set_tile_monitor_index(&self, index: i32) {
-        let mut g = self.inner.lock().unwrap();
-        g.config.tile_monitor_index = index;
-        let _ = crate::config::save(&g.config);
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.config.tile_monitor_index = index;
+            let _ = crate::config::save(&g.config);
+        }
+        // Live / parked pots should jump to the new work area immediately
+        self.retile_now();
     }
 
     pub fn set_workbench_sidebar_open(&self, open: bool) {
@@ -767,6 +776,15 @@ impl SessionHandle {
             return;
         }
         g.config.workbench_sidebar_open = open;
+        let _ = crate::config::save(&g.config);
+    }
+
+    pub fn set_pin_while_playing(&self, on: bool) {
+        let mut g = self.inner.lock().unwrap();
+        if g.config.pin_while_playing == on {
+            return;
+        }
+        g.config.pin_while_playing = on;
         let _ = crate::config::save(&g.config);
     }
 
@@ -1013,6 +1031,8 @@ impl SessionHandle {
             return;
         }
 
+        g.play_gen = g.play_gen.wrapping_add(1);
+        let gen = g.play_gen;
         g.phase = SessionPhase::Starting;
         g.message = "正在开启播放…".into();
         g.last_errors.clear();
@@ -1020,12 +1040,19 @@ impl SessionHandle {
 
         let handle = self.inner.clone();
         thread::spawn(move || {
-            run_start(handle);
+            run_start(handle, gen);
         });
     }
 
     pub fn stop(&self) {
         let mut g = self.inner.lock().unwrap();
+        // Cancel in-flight movie launch
+        if g.phase == SessionPhase::Starting && g.config.media_mode == MediaMode::Movie {
+            g.play_gen = g.play_gen.wrapping_add(1);
+            g.phase = SessionPhase::Idle;
+            g.message = "已取消开启".into();
+            return;
+        }
         if g.phase != SessionPhase::Playing {
             return;
         }
@@ -1072,19 +1099,29 @@ impl SessionHandle {
         });
     }
 
-    /// Recompute grid from live items and re-enable geometry guard.
+    /// Recompute grid from live movie items **or** parked background pots.
     pub fn retile_now(&self) {
         let (pids, area) = {
             let mut g = self.inner.lock().unwrap();
-            if g.phase != SessionPhase::Playing || g.config.media_mode != MediaMode::Movie {
+            let pids: Vec<u32> = if g.phase == SessionPhase::Playing
+                && g.config.media_mode == MediaMode::Movie
+                && !g.items.is_empty()
+            {
+                g.items
+                    .iter()
+                    .map(|i| i.pid)
+                    .filter(|p| *p != 0)
+                    .collect()
+            } else if let Some(ref parked) = g.parked_movie {
+                parked
+                    .items
+                    .iter()
+                    .map(|i| i.pid)
+                    .filter(|p| *p != 0)
+                    .collect()
+            } else {
                 return;
-            }
-            let pids: Vec<u32> = g
-                .items
-                .iter()
-                .map(|i| i.pid)
-                .filter(|p| *p != 0)
-                .collect();
+            };
             let mon = g.config.tile_monitor_index;
             let Ok(area) = tiler::resolve_work_area(mon) else {
                 return;
@@ -1201,7 +1238,11 @@ fn preview_ready_message(g: &Inner) -> String {
         MediaMode::Movie => "部",
         MediaMode::Image => "张",
     };
-    let mut msg = format!("预览就绪 · {n} {unit} · 确认后点「开启播放」");
+    let action = match g.config.media_mode {
+        MediaMode::Movie => "开启播放",
+        MediaMode::Image => "开启幻灯",
+    };
+    let mut msg = format!("预览就绪 · {n} {unit} · 确认后点「{action}」");
     if let Some(ref p) = g.parked_movie {
         if g.config.media_mode == MediaMode::Image {
             msg.push_str(&format!(" · 电影后台 {} 部", p.items.len()));
@@ -1253,8 +1294,12 @@ fn idle_message(g: &Inner) -> String {
             unit
         )
     } else {
+        let action = match g.config.media_mode {
+            MediaMode::Movie => "开启播放",
+            MediaMode::Image => "开启幻灯",
+        };
         format!(
-            "预览就绪 · {} {} · 可「开启播放」{bg}",
+            "预览就绪 · {} {} · 可「{action}」{bg}",
             g.preview_files.len(),
             unit
         )
@@ -1265,16 +1310,39 @@ fn mode_switch_message(g: &Inner) -> String {
     idle_message(g)
 }
 
-fn run_start(handle: Arc<Mutex<Inner>>) {
+fn run_start(handle: Arc<Mutex<Inner>>, gen: u64) {
+    let still_valid = |h: &Mutex<Inner>| -> bool {
+        let g = h.lock().unwrap();
+        g.play_gen == gen
+            && g.phase == SessionPhase::Starting
+            && g.config.media_mode == MediaMode::Movie
+    };
+
+    let abort_kill = |h: &Mutex<Inner>, pids: &[u32], msg: &str| {
+        if !pids.is_empty() {
+            potplayer::kill_pids(pids);
+        }
+        let mut g = h.lock().unwrap();
+        if g.play_gen == gen {
+            g.phase = SessionPhase::Idle;
+            g.message = msg.into();
+        }
+    };
+
     let (config, chosen) = {
         let g = handle.lock().unwrap();
+        if g.play_gen != gen {
+            return;
+        }
         (g.config.clone(), g.preview_files.clone())
     };
 
     if chosen.is_empty() {
         let mut g = handle.lock().unwrap();
-        g.phase = SessionPhase::Idle;
-        g.message = "请先「随机预览」生成片单".into();
+        if g.play_gen == gen {
+            g.phase = SessionPhase::Idle;
+            g.message = "请先「随机预览」生成片单".into();
+        }
         return;
     }
 
@@ -1282,27 +1350,39 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         Some(p) => p,
         None => {
             let mut g = handle.lock().unwrap();
-            g.phase = SessionPhase::Idle;
-            g.message = "未找到 PotPlayer，请在设置中指定路径".into();
+            if g.play_gen == gen {
+                g.phase = SessionPhase::Idle;
+                g.message = "未找到 PotPlayer，请在设置中指定路径".into();
+            }
             return;
         }
     };
 
+    if !still_valid(&handle) {
+        return;
+    }
+
     // Root strategy: hide each window ASAP on create → place into grid while hidden → show.
-    // Then geometry guard enforces cells for the entire Playing session (not a timed delay).
     let (launched, mut hwnds, errors) = potplayer::launch_many_hidden(&pot, &chosen);
 
     if launched.is_empty() {
         let mut g = handle.lock().unwrap();
-        g.phase = SessionPhase::Idle;
-        g.last_errors = errors;
-        g.message = "启动 PotPlayer 失败".into();
+        if g.play_gen == gen {
+            g.phase = SessionPhase::Idle;
+            g.last_errors = errors;
+            g.message = "启动 PotPlayer 失败".into();
+        }
         return;
     }
 
     let pids: Vec<u32> = launched.iter().map(|i| i.pid).collect();
     let n = pids.len();
-    // Refresh any still-missing HWNDs
+
+    if !still_valid(&handle) {
+        abort_kill(&handle, &pids, "已取消开启");
+        return;
+    }
+
     for (i, pid) in pids.iter().enumerate() {
         if hwnds.get(i).copied().unwrap_or(0) == 0 {
             let h = potplayer::wait_single_hwnd(*pid, 2000);
@@ -1315,41 +1395,59 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
     }
 
+    if !still_valid(&handle) {
+        abort_kill(&handle, &pids, "已取消开启");
+        return;
+    }
+
     let mon = handle.lock().unwrap().config.tile_monitor_index;
     let Ok(area) = tiler::resolve_work_area(mon) else {
-        let mut g = handle.lock().unwrap();
-        g.phase = SessionPhase::Idle;
-        g.message = "无法读取屏幕工作区".into();
+        abort_kill(&handle, &pids, "无法读取屏幕工作区");
         return;
     };
     let rects = tiler::grid_layout(n, area);
 
-    // Place while hidden, then show — no flash of remembered fullscreen
     for (h, r) in hwnds.iter().zip(rects.iter()) {
         if *h != 0 {
             let _ = tiler::place_window(*h, *r, false);
         }
     }
     thread::sleep(Duration::from_millis(80));
+    if !still_valid(&handle) {
+        abort_kill(&handle, &pids, "已取消开启");
+        return;
+    }
     for (h, r) in hwnds.iter().zip(rects.iter()) {
         if *h != 0 {
             let _ = tiler::place_window(*h, *r, true);
         }
     }
-    // One more enforce after show (player may nudge on first paint)
     thread::sleep(Duration::from_millis(200));
+    if !still_valid(&handle) {
+        abort_kill(&handle, &pids, "已取消开启");
+        return;
+    }
     for (h, r) in hwnds.iter().zip(rects.iter()) {
         if *h != 0 {
             let _ = tiler::place_window(*h, *r, true);
         }
     }
 
-    // Commit session + targets, start permanent geometry guard
-    {
+    // Commit only if this generation is still the active start
+    let pin_after = {
         let mut g = handle.lock().unwrap();
+        if g.play_gen != gen
+            || g.phase != SessionPhase::Starting
+            || g.config.media_mode != MediaMode::Movie
+        {
+            drop(g);
+            potplayer::kill_pids(&pids);
+            return;
+        }
         let paths: Vec<PathBuf> = launched.iter().map(|i| i.path.clone()).collect();
         let hist_size = g.config.recent_history_size;
         let mode = g.config.media_mode;
+        let pin = g.config.pin_while_playing;
         g.history_mut().push_many(&paths, hist_size);
         let hist = g.history().clone();
         save_history(mode, &hist);
@@ -1368,16 +1466,15 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
             msg.push_str(" · 部分失败");
         }
         g.message = msg;
-    }
+        pin
+    };
 
-    // Geometry guard: whole Playing lifetime — fix whenever PotPlayer restores old pos/size
     let handle_guard = handle.clone();
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_millis(140));
             let (guard_on, targets, should_exit): (bool, Vec<(u32, tiler::Rect)>, bool) = {
                 let g = handle_guard.lock().unwrap();
-                // Enforce while Playing *or* pots parked in background (image mode)
                 let pots_live = (g.phase == SessionPhase::Playing
                     && g.config.media_mode == MediaMode::Movie
                     && !g.items.is_empty())
@@ -1400,7 +1497,6 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
             if !guard_on {
                 continue;
             }
-            // Refresh HWNDs and snap any drift back to assigned cell
             let pids: Vec<u32> = targets.iter().map(|(p, _)| *p).collect();
             let hwnds = potplayer::hwnds_aligned_to_pids(&pids, 3, 30);
             for (i, (_pid, rect)) in targets.iter().enumerate() {
@@ -1412,12 +1508,20 @@ fn run_start(handle: Arc<Mutex<Inner>>) {
         }
     });
 
-    // After PotPlayers open, raise control panel and pin it (app clears pin on minimize).
-    thread::spawn(|| {
+    // Raise panel; pin only if user still wants it
+    thread::spawn(move || {
         thread::sleep(Duration::from_millis(450));
-        crate::tray::force_show_and_pin();
+        if pin_after {
+            crate::tray::force_show_and_pin();
+        } else {
+            crate::tray::force_show_main_window();
+        }
         thread::sleep(Duration::from_millis(600));
-        crate::tray::force_show_and_pin();
+        if pin_after {
+            crate::tray::force_show_and_pin();
+        } else {
+            crate::tray::force_show_main_window();
+        }
     });
 }
 

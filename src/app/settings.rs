@@ -1,5 +1,5 @@
 ﻿//! Settings modal UI.
-use eframe::egui::{self, Color32, Layout, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, RichText, Sense, Stroke, Vec2};
 
 use crate::config::{ImagePlayStyle, MediaMode};
 use super::theme::{BG, BG_SOFT, FAINT, INK, LINE, LINE_STRONG, MUTED};
@@ -141,7 +141,6 @@ impl SuijiApp {
                                 if let Some(removed) = self.session.remove_library_path(i) {
                                     let short = truncate_path(&removed, 28);
                                     self.show_toast(format!("已移除片库：{short}"));
-                                    self.fit_height_frames = 3;
                                 } else if !name.is_empty() {
                                     self.show_toast(format!("移除失败：{}", truncate_path(&name, 24)));
                                 }
@@ -158,7 +157,6 @@ impl SuijiApp {
                         let p = folder.to_string_lossy().to_string();
                         self.session.add_library_path(p.clone());
                         self.show_toast(format!("已添加片库：{}", truncate_path(&p, 28)));
-                        self.fit_height_frames = 3;
                     }
                 }
                 ui.add_space(4.0);
@@ -454,7 +452,6 @@ impl SuijiApp {
             let cfg = self.session.config_clone();
             let save_ok = crate::config::save(&cfg).is_ok();
             self.show_settings = false; // begin close anim
-            self.fit_height_frames = 4;
             if save_ok {
                 let roots = cfg.roots_for(cfg.media_mode).len();
                 let (cmin, cmax) = cfg.count_bounds_for(cfg.media_mode);
@@ -469,7 +466,9 @@ impl SuijiApp {
                 self.show_toast("设置未能写入文件，请检查目录权限");
             }
         } else if !open && self.show_settings {
-            // Closed via window X — changes were already live-saved
+            // Closed via window X — also commit PotPlayer path (other fields live-save)
+            let path = self.pot_path_edit.trim().to_string();
+            self.session.set_potplayer_path(path);
             self.show_settings = false;
             self.show_toast("已关闭设置（修改已即时生效）");
         }
