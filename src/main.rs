@@ -111,11 +111,11 @@ fn main() -> eframe::Result<()> {
         ));
     }
 
-    // Workbench: collapsible ops rail · main preview stage
+    // Full-width workbench: room for action strip + preview grid
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1024.0, 640.0])
-        .with_min_inner_size([720.0, 480.0])
-        .with_max_inner_size([1440.0, 960.0])
+        .with_inner_size([1080.0, 700.0])
+        .with_min_inner_size([800.0, 520.0])
+        .with_max_inner_size([1920.0, 1200.0])
         .with_resizable(true)
         .with_visible(true)
         .with_active(true)

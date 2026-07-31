@@ -38,6 +38,37 @@ pub fn resolve_potplayer_path(configured: &str) -> Option<PathBuf> {
     None
 }
 
+/// Open files with the OS default associated app (fallback when PotPlayer is missing).
+/// Uses `cmd /C start "" <path>` so associations work without ShellExecute bindings.
+/// Returns how many launches were started and any per-file errors.
+pub fn open_with_system_default(files: &[PathBuf]) -> (usize, Vec<String>) {
+    let mut ok = 0usize;
+    let mut errors = Vec::new();
+    for (i, file) in files.iter().enumerate() {
+        if i > 0 {
+            thread::sleep(Duration::from_millis(120));
+        }
+        if !file.is_file() {
+            errors.push(format!("{}: 文件不存在", file.display()));
+            continue;
+        }
+        // `start` requires an empty window title argument when the path may contain spaces.
+        let status = Command::new("cmd")
+            .args([
+                "/C",
+                "start",
+                "",
+                &file.to_string_lossy(),
+            ])
+            .spawn();
+        match status {
+            Ok(_) => ok += 1,
+            Err(e) => errors.push(format!("{}: {e}", file.display())),
+        }
+    }
+    (ok, errors)
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchedItem {
     pub path: PathBuf,

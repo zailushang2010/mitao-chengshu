@@ -62,6 +62,49 @@ pub fn pick(
     pool
 }
 
+/// Pick one file not in `blacklist` and not in `exclude` (e.g. other preview slots).
+/// Soft-avoids `recent` when possible; falls back into recent / full eligible if needed.
+pub fn pick_one_excluding(
+    library: &[PathBuf],
+    avoid_recent: bool,
+    recent: &[PathBuf],
+    blacklist: &[PathBuf],
+    exclude: &[PathBuf],
+) -> Option<PathBuf> {
+    if library.is_empty() {
+        return None;
+    }
+    let blocked: HashSet<String> = blacklist
+        .iter()
+        .chain(exclude.iter())
+        .map(|p| normalize_key(p))
+        .collect();
+    let eligible: Vec<PathBuf> = library
+        .iter()
+        .filter(|p| !blocked.contains(&normalize_key(p)))
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+    let mut rng = thread_rng();
+    if avoid_recent && !recent.is_empty() {
+        let recent_set: HashSet<String> = recent.iter().map(|p| normalize_key(p)).collect();
+        let mut preferred: Vec<PathBuf> = eligible
+            .iter()
+            .filter(|p| !recent_set.contains(&normalize_key(p)))
+            .cloned()
+            .collect();
+        if !preferred.is_empty() {
+            preferred.shuffle(&mut rng);
+            return preferred.into_iter().next();
+        }
+    }
+    let mut pool = eligible;
+    pool.shuffle(&mut rng);
+    pool.into_iter().next()
+}
+
 fn normalize_key(p: &Path) -> String {
     p.to_string_lossy().to_ascii_lowercase()
 }
@@ -72,6 +115,17 @@ mod tests {
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn pick_one_skips_exclude_and_blacklist() {
+        let lib = paths(&["a.mkv", "b.mkv", "c.mkv"]);
+        let ex = paths(&["a.mkv", "b.mkv"]);
+        let bl = paths(&[]);
+        let got = pick_one_excluding(&lib, false, &[], &bl, &ex).unwrap();
+        assert_eq!(got, PathBuf::from("c.mkv"));
+        let bl2 = paths(&["c.mkv"]);
+        assert!(pick_one_excluding(&lib, false, &[], &bl2, &ex).is_none());
     }
 
     #[test]

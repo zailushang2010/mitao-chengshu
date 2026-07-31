@@ -20,6 +20,19 @@ pub enum SessionPhase {
     Stopping,
 }
 
+/// User-facing result of toolbar「重新扫描」.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescanOutcome {
+    /// Index already matches disk; disk cache kept, no long walk.
+    AlreadyFresh { count: usize },
+    /// Background scan started. `force`: all roots re-walked; else only stale roots.
+    Started { force: bool },
+    /// A scan is already running.
+    Busy,
+    /// No library roots configured.
+    NoRoots,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionItemView {
     pub index: usize,
@@ -52,6 +65,8 @@ pub struct SessionSnapshot {
     /// Movie PotPlayers still running while user is in 图片 mode (plan A).
     pub movie_in_background: bool,
     pub movie_background_count: usize,
+    /// Configured/auto path resolves to a PotPlayer exe (movie complete path).
+    pub pot_available: bool,
 }
 
 impl Default for SessionSnapshot {
@@ -73,6 +88,7 @@ impl Default for SessionSnapshot {
             indexing_found: 0,
             movie_in_background: false,
             movie_background_count: 0,
+            pot_available: false,
         }
     }
 }
@@ -352,6 +368,7 @@ impl SessionHandle {
                 .as_ref()
                 .map(|p| p.items.len())
                 .unwrap_or(0),
+            pot_available: potplayer::resolve_potplayer_path(&g.config.potplayer_path).is_some(),
         }
     }
 
@@ -480,9 +497,9 @@ impl SessionHandle {
             let cancel = g.scan_cancel.clone();
             if g.config.media_mode == mode {
                 g.message = if force {
-                    "强制扫描中…".into()
+                    "全量扫描中… 扫完前仍可用当前名单".into()
                 } else {
-                    "索引中…".into()
+                    "索引中… 未变目录走缓存".into()
                 };
             }
             (roots, exts, epoch, progress, cancel)
@@ -494,6 +511,8 @@ impl SessionHandle {
             let mut all_files: Vec<PathBuf> = Vec::new();
             let mut root_paths: Vec<PathBuf> = Vec::new();
             let handle_msg = handle.clone();
+            let mut from_cache = 0usize;
+            let mut walked = 0usize;
 
             for root_s in &roots {
                 if is_cancelled() {
@@ -505,11 +524,12 @@ impl SessionHandle {
                     if let Some(cached) = crate::index_cache::load_root(&root, &exts) {
                         let base = all_files.len();
                         all_files.extend(cached);
+                        from_cache += 1;
                         progress.store(all_files.len(), Ordering::Relaxed);
                         if let Ok(mut g) = handle_msg.try_lock() {
                             if g.config.media_mode == mode && g.is_scan_busy(mode) {
                                 g.message = format!(
-                                    "索引中… 缓存 {} 个（合计 {}）",
+                                    "索引中… 缓存命中 {} 个（合计 {}）",
                                     all_files.len() - base,
                                     all_files.len()
                                 );
@@ -518,6 +538,7 @@ impl SessionHandle {
                         continue;
                     }
                 }
+                walked += 1;
                 let start = all_files.len();
                 let mut on_found = |n: usize| {
                     progress.store(n, Ordering::Relaxed);
@@ -538,6 +559,7 @@ impl SessionHandle {
                 ) {
                     Some(files) => {
                         if !is_cancelled() {
+                            // Only rewrite this root's disk cache after a successful walk
                             crate::index_cache::save_root(&root, &exts, &files);
                         }
                         all_files.extend(files);
@@ -553,7 +575,7 @@ impl SessionHandle {
             }
             if is_cancelled() {
                 g.set_scan_busy(mode, false);
-                // Keep previous library if any
+                // Keep previous library if any — never left empty mid-cancel after rescan
                 if g.config.media_mode == mode {
                     g.message = if g.is_indexed(mode) {
                         format!("索引已取消 · 仍用上次 {} 个", g.library().len())
@@ -565,13 +587,22 @@ impl SessionHandle {
             }
             all_files.sort();
             all_files.dedup();
+            let n = all_files.len();
             let lib = Library {
                 roots: root_paths,
                 files: all_files,
             };
             g.set_library(mode, lib);
             if g.config.media_mode == mode && g.phase == SessionPhase::Idle {
-                g.message = idle_message(&g);
+                if force {
+                    g.message = format!("全量扫描完成 · {n} 个");
+                } else if walked == 0 {
+                    g.message = format!("片库无变化 · 缓存 {n} 个");
+                } else {
+                    g.message = format!(
+                        "索引已更新 · {n} 个（重扫 {walked} 目录 · 缓存 {from_cache}）"
+                    );
+                }
             }
         });
     }
@@ -867,20 +898,95 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
-    pub fn rescan(&self) {
-        let mode = {
-            let mut g = self.inner.lock().unwrap();
+    /// Default toolbar action: **smart** rescan.
+    /// - Does **not** wipe the in-memory list or disk cache first (旧名单一直可用到扫完).
+    /// - Unchanged roots reuse on-disk cache; only changed roots are re-walked.
+    /// - If nothing is stale, returns [`RescanOutcome::AlreadyFresh`] immediately.
+    pub fn rescan(&self) -> RescanOutcome {
+        self.rescan_ex(false)
+    }
+
+    /// Shift+click / advanced: re-walk every root, but still keep the previous
+    /// in-memory library until the new scan finishes (and rewrite disk cache only then).
+    pub fn rescan_force(&self) -> RescanOutcome {
+        self.rescan_ex(true)
+    }
+
+    fn rescan_ex(&self, force: bool) -> RescanOutcome {
+        let (mode, busy, count, roots, exts) = {
+            let g = self.inner.lock().unwrap();
             let mode = g.config.media_mode;
-            // Force full disk walk; invalidate memory index for this mode
-            g.invalidate_mode(mode);
-            g.message = "强制扫描中…".into();
-            mode
+            (
+                mode,
+                g.is_scan_busy(mode),
+                g.library().len(),
+                g.config.roots_for(mode),
+                g.config.extensions_for(mode).to_vec(),
+            )
         };
-        self.begin_scan_ex(mode, true);
+        if busy {
+            return RescanOutcome::Busy;
+        }
+        if roots.is_empty() {
+            return RescanOutcome::NoRoots;
+        }
+        if !force {
+            let any_stale = roots.iter().any(|r| {
+                crate::index_cache::is_stale(PathBuf::from(r).as_path(), &exts)
+            });
+            if !any_stale {
+                // Quick consistency pass: rebuild from cache only (still cheap)
+                // so UI count stays in sync; do not full-walk.
+                {
+                    let mut g = self.inner.lock().unwrap();
+                    if g.config.media_mode == mode && g.phase == SessionPhase::Idle {
+                        g.message = format!("片库无变化 · 继续用缓存 {count} 个");
+                    }
+                }
+                return RescanOutcome::AlreadyFresh { count };
+            }
+            {
+                let mut g = self.inner.lock().unwrap();
+                if g.config.media_mode == mode {
+                    g.message = "检查片库… 有变化的目录才重扫".into();
+                }
+            }
+            // Do NOT invalidate_mode — keep previous list until worker finishes
+            self.begin_scan_ex(mode, false);
+            RescanOutcome::Started { force: false }
+        } else {
+            {
+                let mut g = self.inner.lock().unwrap();
+                if g.config.media_mode == mode {
+                    g.message = "全量扫描中… 扫完前仍可用当前名单".into();
+                }
+            }
+            // Keep memory list; force only skips reading cache per root
+            self.begin_scan_ex(mode, true);
+            RescanOutcome::Started { force: true }
+        }
+    }
+
+    /// If any library root's on-disk tree no longer matches the index cache,
+    /// start a background non-force scan (stale roots re-walk; fresh roots reuse cache).
+    /// Returns true when a scan was started.
+    pub fn refresh_if_stale(&self) -> bool {
+        matches!(
+            self.rescan_ex(false),
+            RescanOutcome::Started { force: false }
+        )
     }
 
     /// Randomly pick a slate into preview only — does not launch PotPlayer.
     pub fn roll_preview(&self) {
+        // Prefer a fresh index when nested folders changed (no manual 重新扫描).
+        if self.refresh_if_stale() {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase == SessionPhase::Idle {
+                g.message = "片库正在更新，完成后请再点随机预览".into();
+            }
+            return;
+        }
         let mut g = self.inner.lock().unwrap();
         if g.phase != SessionPhase::Idle {
             return;
@@ -934,6 +1040,167 @@ impl SessionHandle {
         } else {
             g.message = preview_ready_message(&g);
         }
+    }
+
+    /// Replace one preview slot with a new random pick; keep the rest.
+    /// Returns `Ok(new_path)` or `Err` reason for toast.
+    pub fn replace_preview_item(&self, index: usize) -> Result<PathBuf, String> {
+        self.replace_preview_items(&[index])
+            .map(|_n| {
+                // return path at index after replace
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .preview_files
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .and_then(|p| {
+                if p.as_os_str().is_empty() {
+                    Err("换一部失败".into())
+                } else {
+                    Ok(p)
+                }
+            })
+    }
+
+    /// Replace several preview slots; keep unselected. Returns how many were replaced.
+    pub fn replace_preview_items(&self, indices: &[usize]) -> Result<usize, String> {
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle {
+            return Err("播放中不能换预览".into());
+        }
+        if g.is_scan_busy(g.config.media_mode) {
+            return Err("片库索引中，请稍候".into());
+        }
+        if g.library().is_empty() {
+            return Err("片库为空".into());
+        }
+        let mut idxs: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| i < g.preview_files.len())
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        if idxs.is_empty() {
+            return Err("请先勾选要换的项".into());
+        }
+
+        let avoid = g.history().as_path_set();
+        let blocked = g.blacklist().as_path_set();
+        let lib_files = g.library().files.clone();
+        let mut replaced = 0usize;
+        let mut last_err = String::new();
+
+        for &index in &idxs {
+            // Exclude all current slate so we never duplicate keepers or re-pick same
+            let exclude = g.preview_files.clone();
+            match picker::pick_one_excluding(
+                &lib_files,
+                g.config.avoid_recent,
+                &avoid,
+                &blocked,
+                &exclude,
+            ) {
+                Some(next) => {
+                    g.preview_files[index] = next;
+                    replaced += 1;
+                }
+                None => {
+                    last_err = "没有更多可换片源（可检查黑名单或扩大片库）".into();
+                    break;
+                }
+            }
+        }
+
+        sync_preview_store(&mut g);
+        g.message = preview_ready_message(&g);
+        if replaced == 0 {
+            Err(if last_err.is_empty() {
+                "未能换片".into()
+            } else {
+                last_err
+            })
+        } else if replaced < idxs.len() {
+            Err(format!(
+                "已换 {replaced}/{} 部，其余无更多片源",
+                idxs.len()
+            ))
+        } else {
+            Ok(replaced)
+        }
+    }
+
+    /// Remove several preview slots (higher index first). Returns removed count.
+    pub fn remove_preview_items(&self, indices: &[usize]) -> usize {
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle {
+            return 0;
+        }
+        let mut idxs: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| i < g.preview_files.len())
+            .collect();
+        idxs.sort_unstable_by(|a, b| b.cmp(a));
+        idxs.dedup();
+        let mut n = 0;
+        for i in idxs {
+            if i < g.preview_files.len() {
+                g.preview_files.remove(i);
+                n += 1;
+            }
+        }
+        sync_preview_store(&mut g);
+        if g.preview_files.is_empty() {
+            g.message = idle_message(&g);
+        } else {
+            g.message = preview_ready_message(&g);
+        }
+        n
+    }
+
+    /// Blacklist several preview slots. Returns how many were banned.
+    pub fn blacklist_preview_items(&self, indices: &[usize]) -> usize {
+        let mut paths = Vec::new();
+        let mode = {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Idle {
+                return 0;
+            }
+            let mut idxs: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|&i| i < g.preview_files.len())
+                .collect();
+            idxs.sort_unstable_by(|a, b| b.cmp(a));
+            idxs.dedup();
+            let mode = g.config.media_mode;
+            for i in idxs {
+                if i < g.preview_files.len() {
+                    let path = g.preview_files.remove(i);
+                    g.blacklist_mut().add(&path);
+                    paths.push(path);
+                }
+            }
+            sync_preview_store(&mut g);
+            if g.preview_files.is_empty() {
+                g.message = idle_message(&g);
+            } else {
+                g.message = preview_ready_message(&g);
+            }
+            mode
+        };
+        if !paths.is_empty() {
+            let g = self.inner.lock().unwrap();
+            let _ = match mode {
+                MediaMode::Movie => g.movie_blacklist.save_movies(),
+                MediaMode::Image => g.image_blacklist.save_images(),
+            };
+        }
+        paths.len()
     }
 
     /// Remove from preview and permanently blacklist (never pick again).
@@ -1349,10 +1616,28 @@ fn run_start(handle: Arc<Mutex<Inner>>, gen: u64) {
     let pot = match potplayer::resolve_potplayer_path(&config.potplayer_path) {
         Some(p) => p,
         None => {
+            // Fallback: open with OS default player (no tiling / no per-item control).
+            if !still_valid(&handle) {
+                return;
+            }
+            let (ok_n, errors) = potplayer::open_with_system_default(&chosen);
             let mut g = handle.lock().unwrap();
-            if g.play_gen == gen {
-                g.phase = SessionPhase::Idle;
-                g.message = "未找到 PotPlayer，请在设置中指定路径".into();
+            if g.play_gen != gen {
+                return;
+            }
+            g.phase = SessionPhase::Idle;
+            g.last_errors = errors;
+            if ok_n > 0 {
+                let hist_size = g.config.recent_history_size;
+                g.history_mut().push_many(&chosen, hist_size);
+                let hist = g.history().clone();
+                let mode = g.config.media_mode;
+                save_history(mode, &hist);
+                g.message = format!(
+                    "已用系统默认打开 {ok_n} 部 · 无平铺 · 设置可装 PotPlayer"
+                );
+            } else {
+                g.message = "无法打开：未找到 PotPlayer，且系统打开失败".into();
             }
             return;
         }

@@ -186,8 +186,17 @@ pub(crate) fn ease_out_cubic(t: f32) -> f32 {
 }
 
 pub(crate) fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
-    let width = ui.available_width();
-    let height = 48.0;
+    primary_btn_w(ui, ui.available_width(), 48.0, text, enabled)
+}
+
+/// Fixed-size primary for the main-stage action strip.
+pub(crate) fn primary_btn_w(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    text: &str,
+    enabled: bool,
+) -> egui::Response {
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     if !enabled {
         resp = resp.on_disabled_hover_text("请先完成片库设置并确保有视频");
@@ -203,12 +212,13 @@ pub(crate) fn primary_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui:
         INK
     };
     let draw = press_draw_rect(rect, &resp, enabled);
-    ui.painter().rect_filled(draw, 0.0, bg);
+    ui.painter().rect_filled(draw, 2.0, bg);
+    let font = if height < 40.0 { 13.5 } else { 15.0 };
     ui.painter().text(
         draw.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::proportional(16.0),
+        egui::FontId::proportional(font),
         ON_INK,
     );
     if enabled {
@@ -252,8 +262,147 @@ pub(crate) fn mini_text_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     resp
 }
 
+/// Result of the multi-select batch bar (idle preview).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionBarAction {
+    Replace,
+    Remove,
+    Blacklist,
+    Clear,
+}
+
+/// Quiet paper selection strip: `3` · 换 · 剔除 · 拉黑 · 取消
+pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<SelectionBarAction> {
+    if selected == 0 {
+        return None;
+    }
+    let mut action = None;
+    egui::Frame::NONE
+        .fill(BG_SOFT)
+        .stroke(Stroke::new(1.0, LINE))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .corner_radius(2.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.set_min_height(28.0);
+
+                // Count only — no “已选” noise
+                ui.label(
+                    RichText::new(format!("{selected}"))
+                        .size(14.0)
+                        .color(INK)
+                        .strong(),
+                );
+                ui.label(RichText::new("项").size(12.0).color(MUTED));
+
+                let (div, _) = ui.allocate_exact_size(Vec2::new(1.0, 16.0), Sense::hover());
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(div.center().x, div.top() + 1.0),
+                        egui::pos2(div.center().x, div.bottom() - 1.0),
+                    ],
+                    Stroke::new(1.0, LINE_STRONG),
+                );
+
+                if bar_solid_btn(ui, "换").clicked() {
+                    action = Some(SelectionBarAction::Replace);
+                }
+                if bar_outline_btn(ui, "剔除").clicked() {
+                    action = Some(SelectionBarAction::Remove);
+                }
+                if bar_outline_btn(ui, "拉黑").clicked() {
+                    action = Some(SelectionBarAction::Blacklist);
+                }
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let clear = ui.add(
+                        egui::Label::new(RichText::new("取消").size(12.5).color(MUTED))
+                            .sense(Sense::click()),
+                    );
+                    if clear.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if clear.clicked() {
+                        action = Some(SelectionBarAction::Clear);
+                    }
+                });
+            });
+        });
+    action
+}
+
+fn bar_solid_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let pad = Vec2::new(16.0, 5.0);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(13.0),
+        ON_INK,
+    );
+    let size = Vec2::new((galley.size().x + pad.x * 2.0).max(40.0), 28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let bg = if pressed {
+        Color32::from_rgb(0x14, 0x12, 0x11)
+    } else if resp.hovered() {
+        Color32::from_rgb(0x29, 0x25, 0x24)
+    } else {
+        INK
+    };
+    ui.painter().rect_filled(draw, 2.0, bg);
+    ui.painter().galley(
+        egui::pos2(
+            draw.center().x - galley.size().x * 0.5,
+            draw.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        ON_INK,
+    );
+    resp
+}
+
+fn bar_outline_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let pad = Vec2::new(12.0, 5.0);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(13.0),
+        INK,
+    );
+    let size = Vec2::new((galley.size().x + pad.x * 2.0).max(44.0), 28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let fill = if pressed {
+        Color32::from_rgb(0xD6, 0xD0, 0xC6)
+    } else if resp.hovered() {
+        BG
+    } else {
+        Color32::TRANSPARENT
+    };
+    let stroke = if pressed || resp.hovered() {
+        Stroke::new(1.0, INK)
+    } else {
+        Stroke::new(1.0, LINE_STRONG)
+    };
+    ui.painter().rect_filled(draw, 2.0, fill);
+    ui.painter()
+        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
+    ui.painter().galley(
+        egui::pos2(
+            draw.center().x - galley.size().x * 0.5,
+            draw.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        INK,
+    );
+    resp
+}
+
 pub(crate) fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+    // Match main-stage primary strip height (32) for aligned action row.
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
     let pressed = enabled && resp.is_pointer_button_down_on();
     let draw = press_draw_rect(rect, &resp, enabled);
     let stroke = if !enabled {
@@ -263,19 +412,21 @@ pub(crate) fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: 
     } else if resp.hovered() {
         Stroke::new(1.0, MUTED)
     } else {
-        Stroke::new(1.0, FAINT)
+        Stroke::new(1.0, LINE_STRONG)
     };
     let fg = if enabled { INK } else { FAINT };
     if pressed {
-        ui.painter().rect_filled(draw, 0.0, BG_SOFT);
+        ui.painter().rect_filled(draw, 2.0, BG_SOFT);
+    } else if enabled && resp.hovered() {
+        ui.painter().rect_filled(draw, 2.0, BG);
     }
     ui.painter()
-        .rect_stroke(draw, 0.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
     ui.painter().text(
         draw.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::proportional(14.0),
+        egui::FontId::proportional(13.5),
         fg,
     );
     if enabled {
@@ -297,8 +448,6 @@ pub(crate) enum IconKind {
     Rescan,
     Tray,
     Pin,
-    /// Workbench ops rail show/hide
-    Sidebar,
 }
 
 pub(crate) fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Response {
@@ -404,20 +553,6 @@ pub(crate) fn icon_btn_toggle(ui: &mut egui::Ui, kind: IconKind, tip: &str, acti
                 s,
             );
         }
-        IconKind::Sidebar => {
-            // Workbench: narrow left rail + wide main pane
-            let left = egui::Rect::from_min_max(
-                egui::pos2(c.x - 9.0, c.y - 8.0),
-                egui::pos2(c.x - 2.5, c.y + 8.0),
-            );
-            let right = egui::Rect::from_min_max(
-                egui::pos2(c.x - 0.5, c.y - 8.0),
-                egui::pos2(c.x + 9.0, c.y + 8.0),
-            );
-            ui.painter().rect_filled(left, 1.0, ink);
-            ui.painter()
-                .rect_stroke(right, 1.0, s, egui::StrokeKind::Outside);
-        }
     }
 
     resp.on_hover_text(tip)
@@ -430,14 +565,23 @@ pub(crate) fn sized_outline_button(text: &str, width: f32) -> egui::Button<'stat
         .min_size(Vec2::new(width, 32.0))
 }
 
+/// Preview grid cell. When `selectable`, click toggles selection (caller updates state).
+/// Returns the response so the app can handle click / hover.
 pub(crate) fn preview_cell(
     ui: &mut egui::Ui,
     w: f32,
     h: f32,
     label: &str,
     texture: Option<&TextureHandle>,
-) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    selected: bool,
+    selectable: bool,
+) -> egui::Response {
+    let sense = if selectable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense);
     if let Some(tex) = texture {
         let size = tex.size_vec2();
         let fit = (rect.width() / size.x).min(rect.height() / size.y);
@@ -455,12 +599,54 @@ pub(crate) fn preview_cell(
         ui.painter()
             .rect_filled(rect, 0.0, Color32::from_rgb(0xE7, 0xE5, 0xE4));
     }
-    ui.painter().rect_stroke(
-        rect,
-        0.0,
-        Stroke::new(1.0, LINE_STRONG),
-        egui::StrokeKind::Inside,
-    );
+
+    // Selection / hover chrome
+    if selected {
+        ui.painter().rect_filled(
+            rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(0x2A, 0x24, 0x1F, 48),
+        );
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(2.5, INK),
+            egui::StrokeKind::Inside,
+        );
+        // Corner selected badge (drawn, no missing-glyph chars)
+        let badge = 16.0_f32.min(rect.width() * 0.2).min(rect.height() * 0.2).max(12.0);
+        let br = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 5.0, rect.top() + 5.0),
+            Vec2::splat(badge),
+        );
+        ui.painter().rect_filled(br, 2.0, INK);
+        // Simple white check: two short strokes
+        let c = br.center();
+        let s = badge * 0.22;
+        ui.painter().line_segment(
+            [
+                egui::pos2(c.x - s * 1.1, c.y + s * 0.15),
+                egui::pos2(c.x - s * 0.15, c.y + s * 0.95),
+            ],
+            Stroke::new(1.8, ON_INK),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(c.x - s * 0.15, c.y + s * 0.95),
+                egui::pos2(c.x + s * 1.25, c.y - s * 0.85),
+            ],
+            Stroke::new(1.8, ON_INK),
+        );
+    } else {
+        let stroke = if selectable && resp.hovered() {
+            Stroke::new(1.5, MUTED)
+        } else {
+            Stroke::new(1.0, LINE_STRONG)
+        };
+        ui.painter()
+            .rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+    }
+
     if !label.is_empty() {
         let short = truncate_path(label, 14);
         let bar = egui::Rect::from_min_max(
@@ -476,6 +662,12 @@ pub(crate) fn preview_cell(
             egui::FontId::proportional(11.0),
             ON_INK,
         );
+    }
+
+    if selectable {
+        resp.on_hover_text(if selected { "取消" } else { "选中" })
+    } else {
+        resp
     }
 }
 
@@ -516,15 +708,37 @@ pub(crate) fn sidebar_list_row(
     actions_w: f32,
     actions: impl FnOnce(&mut egui::Ui),
 ) {
+    sidebar_list_row_select(ui, index, title, None, actions_w, actions);
+}
+
+/// Like [`sidebar_list_row`], optional checkbox for multi-select preview.
+pub(crate) fn sidebar_list_row_select(
+    ui: &mut egui::Ui,
+    index: usize,
+    title: &str,
+    selected: Option<&mut bool>,
+    actions_w: f32,
+    actions: impl FnOnce(&mut egui::Ui),
+) {
+    let checked = selected.as_ref().map(|s| **s).unwrap_or(false);
+    let fill = if checked {
+        Color32::from_rgb(0xE7, 0xE0, 0xD6)
+    } else {
+        BG_SOFT
+    };
     egui::Frame::NONE
-        .fill(BG_SOFT)
-        .stroke(Stroke::new(1.0, LINE))
+        .fill(fill)
+        .stroke(Stroke::new(1.0, if checked { MUTED } else { LINE }))
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.set_min_height(28.0);
                 ui.spacing_mut().item_spacing.x = 4.0;
+
+                if let Some(sel) = selected {
+                    ui.checkbox(sel, "");
+                }
 
                 ui.label(
                     RichText::new(format!("{index}."))
@@ -533,7 +747,6 @@ pub(crate) fn sidebar_list_row(
                         .strong(),
                 );
 
-                // Title takes leftover width after actions; truncate + single hover tip.
                 let title_w = (ui.available_width() - actions_w - 4.0).max(36.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(title_w, 20.0),
