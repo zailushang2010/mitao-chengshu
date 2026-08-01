@@ -3,7 +3,9 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Textur
 use std::path::Path;
 
 use crate::session::SessionPhase;
-use super::theme::{BG, BG_SOFT, FAINT, INK, LINE, LINE_STRONG, MUTED, ON_INK};
+use super::theme::{
+    BG, BG_MAIN, BG_SOFT, FAINT, INK, LINE, LINE_STRONG, MUTED, ON_INK, PEACH, PEACH_INK, RAIL,
+};
 pub(crate) fn load_texture(ctx: &egui::Context, id: &str, path: &Path) -> Option<TextureHandle> {
     let img = image::open(path).ok()?.into_rgba8();
     let size = [img.width() as usize, img.height() as usize];
@@ -42,51 +44,278 @@ pub(crate) fn mode_chip(ui: &mut egui::Ui, label: &str, active: bool, on_click: 
     }
 }
 
+/// Soft pill status (prototype: 待播放).
 pub(crate) fn status_pill(ui: &mut egui::Ui, phase: SessionPhase, message: &str) {
     let (text, bg, fg) = match phase {
         SessionPhase::Idle => {
-            if message.contains("预览") {
-                ("待播放", Color32::from_rgb(0xE7, 0xE0, 0xD6), INK)
+            if message.contains("预览") || message.contains("待播放") {
+                ("待播放", PEACH, PEACH_INK)
             } else {
                 ("就绪", BG_SOFT, MUTED)
             }
         }
-        SessionPhase::Starting => ("启动中", Color32::from_rgb(0xE7, 0xE0, 0xD6), INK),
+        SessionPhase::Starting => ("启动中", PEACH, PEACH_INK),
         SessionPhase::Playing => ("播放中", INK, ON_INK),
-        SessionPhase::Stopping => ("关闭中", Color32::from_rgb(0xE7, 0xE0, 0xD6), INK),
-    };
-    let label = if message.chars().count() < 18 && phase == SessionPhase::Idle {
-        // Prefer short status from message when preview-ready
-        if message.contains("预览就绪") {
-            "待播放"
-        } else if message.chars().count() < 12 {
-            message
-        } else {
-            text
-        }
-    } else {
-        text
+        SessionPhase::Stopping => ("关闭中", PEACH, PEACH_INK),
     };
     let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
-        egui::FontId::proportional(11.0),
+        text.to_string(),
+        egui::FontId::proportional(12.0),
         fg,
     );
-    let pad = Vec2::new(10.0, 4.0);
-    let size = galley.size() + pad * 2.0;
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_stroke(
-        rect,
-        20.0,
-        Stroke::new(1.0, LINE_STRONG),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().rect_filled(rect, 20.0, bg);
+    // Fixed height so header row can center-align with title / stepper / icons
+    let h = 32.0_f32;
+    let w = (galley.size().x + 24.0).max(52.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    ui.painter().rect_filled(rect, 16.0, bg);
     ui.painter().galley(
-        egui::pos2(rect.left() + pad.x, rect.top() + pad.y),
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
         galley,
         fg,
     );
+}
+
+/// Left nav item: icon + label (prototype rail, wider hit).
+pub(crate) fn nav_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    icon: NavIcon,
+) -> egui::Response {
+    let size = Vec2::new(64.0, 58.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect.shrink2(Vec2::new(6.0, 2.0)), &resp, true);
+    let fill = if active {
+        Color32::from_rgb(0xE8, 0xE0, 0xD4)
+    } else if pressed {
+        BG_SOFT
+    } else if resp.hovered() {
+        Color32::from_rgba_unmultiplied(0xE8, 0xE0, 0xD4, 120)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(draw, 12.0, fill);
+    let ink = if active || resp.hovered() { INK } else { MUTED };
+    let c = egui::pos2(draw.center().x, draw.top() + 16.0);
+    paint_nav_icon(ui, c, icon, ink);
+    ui.painter().text(
+        egui::pos2(draw.center().x, draw.bottom() - 11.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(11.5),
+        ink,
+    );
+    resp
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum NavIcon {
+    Movie,
+    Image,
+    Star,
+    Settings,
+}
+
+fn paint_nav_icon(ui: &mut egui::Ui, c: egui::Pos2, icon: NavIcon, ink: Color32) {
+    let s = Stroke::new(1.5, ink);
+    match icon {
+        NavIcon::Movie => {
+            // Play triangle in rounded rect
+            let r = egui::Rect::from_center_size(c, Vec2::new(16.0, 12.0));
+            ui.painter()
+                .rect_stroke(r, 2.0, s, egui::StrokeKind::Outside);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(c.x - 2.0, c.y - 4.0),
+                    egui::pos2(c.x - 2.0, c.y + 4.0),
+                    egui::pos2(c.x + 5.0, c.y),
+                ],
+                ink,
+                Stroke::NONE,
+            ));
+        }
+        NavIcon::Image => {
+            let r = egui::Rect::from_center_size(c, Vec2::new(16.0, 12.0));
+            ui.painter()
+                .rect_stroke(r, 2.0, s, egui::StrokeKind::Outside);
+            ui.painter()
+                .circle_filled(egui::pos2(c.x - 3.0, c.y - 2.0), 1.8, ink);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(r.left() + 2.0, r.bottom() - 2.0),
+                    egui::pos2(c.x, c.y + 1.5),
+                ],
+                s,
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(c.x, c.y + 1.5),
+                    egui::pos2(r.right() - 2.0, r.bottom() - 2.0),
+                ],
+                s,
+            );
+        }
+        NavIcon::Star => {
+            // Simple 5-point star outline
+            let r_out = 7.0_f32;
+            let r_in = 3.2_f32;
+            let mut pts = Vec::with_capacity(10);
+            for i in 0..10 {
+                let a = -std::f32::consts::FRAC_PI_2
+                    + i as f32 * std::f32::consts::TAU / 10.0;
+                let r = if i % 2 == 0 { r_out } else { r_in };
+                pts.push(c + Vec2::new(a.cos() * r, a.sin() * r));
+            }
+            for w in pts.windows(2) {
+                ui.painter().line_segment([w[0], w[1]], s);
+            }
+            if pts.len() >= 2 {
+                ui.painter().line_segment([pts[pts.len() - 1], pts[0]], s);
+            }
+        }
+        NavIcon::Settings => {
+            ui.painter().circle_stroke(c, 5.5, s);
+            ui.painter().circle_filled(c, 2.0, ink);
+            for i in 0..6 {
+                let a = i as f32 * std::f32::consts::TAU / 6.0;
+                let inner = c + Vec2::new(a.cos(), a.sin()) * 4.0;
+                let outer = c + Vec2::new(a.cos(), a.sin()) * 7.5;
+                ui.painter().line_segment([inner, outer], s);
+            }
+        }
+    }
+}
+
+/// Soft outline toolbar chip (筛选 / 排序 look-alike).
+pub(crate) fn soft_outline_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let pad = Vec2::new(12.0, 7.0);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(12.5),
+        MUTED,
+    );
+    let size = galley.size() + pad * 2.0;
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let draw = press_draw_rect(rect, &resp, true);
+    let fill = if resp.is_pointer_button_down_on() {
+        BG_SOFT
+    } else if resp.hovered() {
+        BG_MAIN
+    } else {
+        BG_MAIN
+    };
+    ui.painter().rect_filled(draw, 10.0, fill);
+    ui.painter().rect_stroke(
+        draw,
+        10.0,
+        Stroke::new(1.0, LINE_STRONG),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            draw.center().x - galley.size().x * 0.5,
+            draw.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        MUTED,
+    );
+    resp
+}
+
+/// Rounded search field chrome matching prototype top bar (32px tall for header align).
+pub(crate) fn search_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) {
+    let h = 32.0_f32;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
+    ui.painter().rect_filled(rect, 16.0, BG_MAIN);
+    ui.painter().rect_stroke(
+        rect,
+        16.0,
+        Stroke::new(1.0, LINE),
+        egui::StrokeKind::Inside,
+    );
+    // Inner text edit, vertically centered in the pill
+    let inner = rect.shrink2(Vec2::new(12.0, 4.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        ui.set_min_size(inner.size());
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .desired_width(inner.width())
+                    .hint_text(hint)
+                    .frame(false),
+            );
+        });
+    });
+}
+
+/// Soft count stepper matching prototype white chips (fixed 32px height for header align).
+pub(crate) fn count_stepper(
+    ui: &mut egui::Ui,
+    value: usize,
+    on_dec: impl FnOnce(),
+    on_inc: impl FnOnce(),
+) {
+    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.set_min_height(32.0);
+        soft_chip_btn(ui, "−", on_dec);
+        // Value chip — same 32px height as ±
+        let val = format!("{value}");
+        let galley = ui.painter().layout_no_wrap(
+            val,
+            egui::FontId::proportional(15.0),
+            INK,
+        );
+        let vw = (galley.size().x + 20.0).max(36.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(vw, 32.0), Sense::hover());
+        ui.painter().rect_filled(rect, 8.0, BG_MAIN);
+        ui.painter().rect_stroke(
+            rect,
+            8.0,
+            Stroke::new(1.0, LINE),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - galley.size().x * 0.5,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            INK,
+        );
+        soft_chip_btn(ui, "+", on_inc);
+    });
+}
+
+fn soft_chip_btn(ui: &mut egui::Ui, text: &str, on_click: impl FnOnce()) {
+    let size = Vec2::new(32.0, 32.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let pressed = resp.is_pointer_button_down_on();
+    let draw = press_draw_rect(rect, &resp, true);
+    let fill = if pressed {
+        BG_SOFT
+    } else if resp.hovered() {
+        BG_MAIN
+    } else {
+        Color32::from_rgb(0xF4, 0xEF, 0xE7)
+    };
+    ui.painter().rect_filled(draw, 8.0, fill);
+    ui.painter()
+        .rect_stroke(draw, 8.0, Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    ui.painter().text(
+        draw.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(16.0),
+        INK,
+    );
+    if resp.clicked() {
+        on_click();
+    }
 }
 
 /// One bound row: label + − value +  (vertically centered, fixed height)
@@ -212,7 +441,8 @@ pub(crate) fn primary_btn_w(
         INK
     };
     let draw = press_draw_rect(rect, &resp, enabled);
-    ui.painter().rect_filled(draw, 2.0, bg);
+    // Prototype: pill-ish black primary
+    ui.painter().rect_filled(draw, 10.0, bg);
     let font = if height < 40.0 { 13.5 } else { 15.0 };
     ui.painter().text(
         draw.center(),
@@ -265,13 +495,15 @@ pub(crate) fn mini_text_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
 /// Result of the multi-select batch bar (idle preview).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectionBarAction {
+    /// Play only the selection (1 = 单部, N = 只开这些).
+    Play,
     Replace,
     Remove,
     Blacklist,
     Clear,
 }
 
-/// Quiet paper selection strip: `3` · 换 · 剔除 · 拉黑 · 取消
+/// Quiet paper selection strip: `3` · 播放 · 换 · 剔除 · 拉黑 · 取消
 pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<SelectionBarAction> {
     if selected == 0 {
         return None;
@@ -306,7 +538,11 @@ pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<Select
                     Stroke::new(1.0, LINE_STRONG),
                 );
 
-                if bar_solid_btn(ui, "换").clicked() {
+                let play_label = if selected == 1 { "播放" } else { "播放所选" };
+                if bar_solid_btn(ui, play_label).clicked() {
+                    action = Some(SelectionBarAction::Play);
+                }
+                if bar_outline_btn(ui, "换").clicked() {
                     action = Some(SelectionBarAction::Replace);
                 }
                 if bar_outline_btn(ui, "剔除").clicked() {
@@ -401,27 +637,26 @@ fn bar_outline_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 pub(crate) fn secondary_btn(ui: &mut egui::Ui, width: f32, text: &str, enabled: bool) -> egui::Response {
-    // Match main-stage primary strip height (32) for aligned action row.
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+    // Prototype outline pill (再来一批)
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click());
     let pressed = enabled && resp.is_pointer_button_down_on();
     let draw = press_draw_rect(rect, &resp, enabled);
     let stroke = if !enabled {
         Stroke::new(1.0, LINE)
-    } else if pressed {
-        Stroke::new(1.2, INK)
-    } else if resp.hovered() {
+    } else if pressed || resp.hovered() {
         Stroke::new(1.0, MUTED)
     } else {
         Stroke::new(1.0, LINE_STRONG)
     };
     let fg = if enabled { INK } else { FAINT };
-    if pressed {
-        ui.painter().rect_filled(draw, 2.0, BG_SOFT);
-    } else if enabled && resp.hovered() {
-        ui.painter().rect_filled(draw, 2.0, BG);
-    }
+    let fill = if pressed {
+        BG_SOFT
+    } else {
+        BG_MAIN
+    };
+    ui.painter().rect_filled(draw, 10.0, fill);
     ui.painter()
-        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 10.0, stroke, egui::StrokeKind::Inside);
     ui.painter().text(
         draw.center(),
         egui::Align2::CENTER_CENTER,
@@ -455,8 +690,9 @@ pub(crate) fn icon_btn(ui: &mut egui::Ui, kind: IconKind, tip: &str) -> egui::Re
 }
 
 /// Magazine-style square icon button; `active` draws stronger (for pin on).
+/// 32×32 to sit on the same baseline as header chips / search.
 pub(crate) fn icon_btn_toggle(ui: &mut egui::Ui, kind: IconKind, tip: &str, active: bool) -> egui::Response {
-    let size = Vec2::new(40.0, 40.0);
+    let size = Vec2::new(32.0, 32.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let hovered = resp.hovered();
     let pressed = resp.is_pointer_button_down_on();
@@ -473,11 +709,11 @@ pub(crate) fn icon_btn_toggle(ui: &mut egui::Ui, kind: IconKind, tip: &str, acti
     } else if hovered {
         BG_SOFT
     } else {
-        BG
+        BG_MAIN
     };
-    ui.painter().rect_filled(draw, 2.0, fill);
+    ui.painter().rect_filled(draw, 8.0, fill);
     ui.painter()
-        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 8.0, stroke, egui::StrokeKind::Inside);
 
     let c = draw.center();
     let ink = if active || hovered || pressed {
@@ -565,8 +801,7 @@ pub(crate) fn sized_outline_button(text: &str, width: f32) -> egui::Button<'stat
         .min_size(Vec2::new(width, 32.0))
 }
 
-/// Preview grid cell. When `selectable`, click toggles selection (caller updates state).
-/// Returns the response so the app can handle click / hover.
+/// Legacy flat cell — routes to card layout for one visual language.
 pub(crate) fn preview_cell(
     ui: &mut egui::Ui,
     w: f32,
@@ -576,53 +811,129 @@ pub(crate) fn preview_cell(
     selected: bool,
     selectable: bool,
 ) -> egui::Response {
+    preview_card(
+        ui,
+        w,
+        h,
+        label,
+        None,
+        None,
+        texture,
+        selected,
+        selectable,
+    )
+}
+
+/// Prototype card: cover-fill poster + title + soft subline (folder) + badges.
+pub(crate) fn preview_card(
+    ui: &mut egui::Ui,
+    w: f32,
+    h: f32,
+    label: &str,
+    subline: Option<&str>,
+    badge: Option<&str>,
+    texture: Option<&TextureHandle>,
+    selected: bool,
+    selectable: bool,
+) -> egui::Response {
     let sense = if selectable {
         Sense::click()
     } else {
         Sense::hover()
     };
+    // Title band for name + subline
+    let title_h = 52.0_f32.min(h * 0.30).max(44.0);
+    let img_h = (h - title_h).max(32.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense);
+    let img_rect = egui::Rect::from_min_size(rect.min, Vec2::new(w, img_h));
+    let radius = 12.0;
+
+    // Soft drop shadow
+    ui.painter().rect_filled(
+        rect.translate(Vec2::new(0.0, 3.0)),
+        radius,
+        Color32::from_rgba_unmultiplied(28, 25, 23, 22),
+    );
+    ui.painter().rect_filled(
+        rect,
+        radius,
+        if selected {
+            Color32::from_rgb(0xEB, 0xE4, 0xD8)
+        } else {
+            BG_MAIN
+        },
+    );
+
+    // Poster plate
+    ui.painter().rect_filled(
+        img_rect,
+        radius,
+        Color32::from_rgb(0x24, 0x20, 0x1D),
+    );
+
     if let Some(tex) = texture {
         let size = tex.size_vec2();
-        let fit = (rect.width() / size.x).min(rect.height() / size.y);
-        let draw = size * fit;
-        let img_rect = egui::Rect::from_center_size(rect.center(), draw);
-        ui.painter()
-            .rect_filled(rect, 0.0, Color32::from_rgb(0x1C, 0x19, 0x17));
+        let (u0, v0, u1, v1) = cover_uv(size, img_rect.size());
         ui.painter().image(
             tex.id(),
             img_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1)),
             Color32::WHITE,
         );
     } else {
-        ui.painter()
-            .rect_filled(rect, 0.0, Color32::from_rgb(0xE7, 0xE5, 0xE4));
+        ui.painter().text(
+            img_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "无封面",
+            egui::FontId::proportional(12.0),
+            FAINT,
+        );
     }
 
-    // Selection / hover chrome
-    if selected {
-        ui.painter().rect_filled(
-            rect,
-            0.0,
-            Color32::from_rgba_unmultiplied(0x2A, 0x24, 0x1F, 48),
+    // Soft corner mask stroke
+    let stroke = if selected {
+        Stroke::new(2.0, INK)
+    } else if selectable && resp.hovered() {
+        Stroke::new(1.2, MUTED)
+    } else {
+        Stroke::new(1.0, LINE)
+    };
+    ui.painter()
+        .rect_stroke(img_rect, radius, stroke, egui::StrokeKind::Inside);
+
+    // Top-left soft badge (index / year-like)
+    if let Some(b) = badge {
+        let galley = ui.painter().layout_no_wrap(
+            b.to_string(),
+            egui::FontId::proportional(11.0),
+            ON_INK,
         );
-        ui.painter().rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(2.5, INK),
-            egui::StrokeKind::Inside,
-        );
-        // Corner selected badge (drawn, no missing-glyph chars)
-        let badge = 16.0_f32.min(rect.width() * 0.2).min(rect.height() * 0.2).max(12.0);
+        let pad = Vec2::new(8.0, 4.0);
         let br = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + 5.0, rect.top() + 5.0),
-            Vec2::splat(badge),
+            egui::pos2(img_rect.left() + 10.0, img_rect.top() + 10.0),
+            galley.size() + pad * 2.0,
         );
-        ui.painter().rect_filled(br, 2.0, INK);
-        // Simple white check: two short strokes
+        ui.painter().rect_filled(
+            br,
+            6.0,
+            Color32::from_rgba_unmultiplied(20, 18, 16, 160),
+        );
+        ui.painter().galley(
+            egui::pos2(br.left() + pad.x, br.top() + pad.y),
+            galley,
+            ON_INK,
+        );
+    }
+
+    if selected {
+        let badge_sz = 18.0_f32;
+        let br = egui::Rect::from_min_size(
+            egui::pos2(img_rect.right() - badge_sz - 10.0, img_rect.top() + 10.0),
+            Vec2::splat(badge_sz),
+        );
+        ui.painter().rect_filled(br, 5.0, INK);
         let c = br.center();
-        let s = badge * 0.22;
+        let s = badge_sz * 0.2;
         ui.painter().line_segment(
             [
                 egui::pos2(c.x - s * 1.1, c.y + s * 0.15),
@@ -637,37 +948,68 @@ pub(crate) fn preview_cell(
             ],
             Stroke::new(1.8, ON_INK),
         );
-    } else {
-        let stroke = if selectable && resp.hovered() {
-            Stroke::new(1.5, MUTED)
-        } else {
-            Stroke::new(1.0, LINE_STRONG)
-        };
-        ui.painter()
-            .rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
     }
 
+    // Title + subline under poster
     if !label.is_empty() {
-        let short = truncate_path(label, 14);
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.bottom() - 16.0),
-            rect.max,
-        );
-        ui.painter()
-            .rect_filled(bar, 0.0, Color32::from_rgba_unmultiplied(28, 25, 23, 160));
+        let short = truncate_path(label, 18);
+        let title_y = img_rect.bottom() + 10.0;
         ui.painter().text(
-            egui::pos2(rect.left() + 4.0, rect.bottom() - 14.0),
+            egui::pos2(rect.left() + 8.0, title_y),
             egui::Align2::LEFT_TOP,
             short,
-            egui::FontId::proportional(11.0),
-            ON_INK,
+            egui::FontId::proportional(13.5),
+            INK,
         );
+        if let Some(sub) = subline {
+            if !sub.is_empty() {
+                // Soft tag chip under title (folder as genre stand-in)
+                let tag = truncate_path(sub, 10);
+                let galley = ui.painter().layout_no_wrap(
+                    tag,
+                    egui::FontId::proportional(11.0),
+                    MUTED,
+                );
+                let pad = Vec2::new(7.0, 3.0);
+                let tr = egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + 8.0, title_y + 20.0),
+                    galley.size() + pad * 2.0,
+                );
+                ui.painter().rect_filled(tr, 4.0, BG_SOFT);
+                ui.painter().galley(
+                    egui::pos2(tr.left() + pad.x, tr.top() + pad.y),
+                    galley,
+                    MUTED,
+                );
+            }
+        }
     }
 
     if selectable {
-        resp.on_hover_text(if selected { "取消" } else { "选中" })
+        resp.on_hover_text(if selected {
+            "取消 · 双击播放 · 右键更多"
+        } else {
+            "选中 · 双击播放 · 右键更多"
+        })
     } else {
         resp
+    }
+}
+
+/// UV rect for cover-style crop into target size.
+fn cover_uv(tex: Vec2, target: Vec2) -> (f32, f32, f32, f32) {
+    let tex_a = tex.x / tex.y;
+    let tgt_a = target.x / target.y.max(1.0);
+    if tex_a > tgt_a {
+        // wider: crop sides
+        let visible_w = tex.y * tgt_a;
+        let u0 = ((tex.x - visible_w) * 0.5) / tex.x;
+        (u0, 0.0, 1.0 - u0, 1.0)
+    } else {
+        // taller: crop top/bottom
+        let visible_h = tex.x / tgt_a.max(0.01);
+        let v0 = ((tex.y - visible_h) * 0.5) / tex.y;
+        (0.0, v0, 1.0, 1.0 - v0)
     }
 }
 

@@ -134,6 +134,10 @@ struct Inner {
     tile_targets: std::collections::HashMap<u32, tiler::Rect>,
     /// Bumped to cancel in-flight `run_start` (mode switch / 取消开启).
     play_gen: u64,
+    /// Optional one-shot play list (subset of preview). Taken by `start` / `run_start`.
+    play_queue: Option<Vec<PathBuf>>,
+    /// Full slate restored after image subset play ends.
+    preview_backup: Option<Vec<PathBuf>>,
 }
 
 impl Inner {
@@ -286,6 +290,8 @@ impl SessionHandle {
             geometry_guard: false,
             tile_targets: std::collections::HashMap::new(),
             play_gen: 0,
+            play_queue: None,
+            preview_backup: None,
         };
         // Initial index for active mode only (keeps other mode for first switch).
         let roots = inner.config.roots_for(mode);
@@ -1255,12 +1261,46 @@ impl SessionHandle {
 
     /// Launch current preview: movies → PotPlayer; images → in-app slideshow.
     pub fn start(&self) {
+        self.start_inner(None);
+    }
+
+    /// Play only the selected preview indices (search → 单选/多选后单独开播).
+    /// Preserves the full preview slate; only this round's play list is narrowed.
+    pub fn start_selected(&self, indices: &[usize]) -> Result<usize, String> {
+        let paths = {
+            let g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Idle {
+                return Err("播放中无法改开播列表".into());
+            }
+            if g.preview_files.is_empty() {
+                return Err("请先生成预览".into());
+            }
+            let mut idxs: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|&i| i < g.preview_files.len())
+                .collect();
+            idxs.sort_unstable();
+            idxs.dedup();
+            if idxs.is_empty() {
+                return Err("请先选中要播放的项".into());
+            }
+            idxs.into_iter()
+                .filter_map(|i| g.preview_files.get(i).cloned())
+                .collect::<Vec<_>>()
+        };
+        let n = paths.len();
+        self.start_inner(Some(paths));
+        Ok(n)
+    }
+
+    fn start_inner(&self, queue: Option<Vec<PathBuf>>) {
         let parked_pids = {
             let mut g = self.inner.lock().unwrap();
             if g.phase != SessionPhase::Idle {
                 return;
             }
-            if g.preview_files.is_empty() {
+            if g.preview_files.is_empty() && queue.is_none() {
                 g.message = "请先「随机预览」生成片单".into();
                 return;
             }
@@ -1279,11 +1319,26 @@ impl SessionHandle {
         }
 
         let mut g = self.inner.lock().unwrap();
-        if g.phase != SessionPhase::Idle || g.preview_files.is_empty() {
+        if g.phase != SessionPhase::Idle {
             return;
         }
+        let play_files = queue
+            .clone()
+            .unwrap_or_else(|| g.preview_files.clone());
+        if play_files.is_empty() {
+            g.message = "请先「随机预览」生成片单".into();
+            return;
+        }
+        g.play_queue = Some(play_files.clone());
+
         if g.config.media_mode == MediaMode::Image {
-            let n = g.preview_files.len();
+            // Overlays read preview_files while playing; stash full slate if subset.
+            let n = play_files.len();
+            if queue.is_some() && play_files.len() != g.preview_files.len() {
+                g.preview_backup = Some(g.preview_files.clone());
+            }
+            g.preview_files = play_files;
+            g.play_queue = None;
             g.phase = SessionPhase::Playing;
             g.items.clear();
             g.last_errors.clear();
@@ -1301,7 +1356,12 @@ impl SessionHandle {
         g.play_gen = g.play_gen.wrapping_add(1);
         let gen = g.play_gen;
         g.phase = SessionPhase::Starting;
-        g.message = "正在开启播放…".into();
+        let n = play_files.len();
+        g.message = if n == 1 {
+            "正在开启（单部）…".into()
+        } else {
+            format!("正在开启播放 · {n} 部…")
+        };
         g.last_errors.clear();
         drop(g);
 
@@ -1326,11 +1386,15 @@ impl SessionHandle {
         if g.config.media_mode == MediaMode::Image {
             g.phase = SessionPhase::Idle;
             g.items.clear();
+            if let Some(full) = g.preview_backup.take() {
+                g.preview_files = full;
+                sync_preview_store(&mut g);
+            }
             if g.preview_files.is_empty() {
                 g.message = idle_message(&g);
             } else {
                 g.message = format!(
-                    "已停止幻灯 · 预览仍保留 {} 张",
+                    "已停止 · 预览仍保留 {} 张",
                     g.preview_files.len()
                 );
             }
@@ -1597,17 +1661,23 @@ fn run_start(handle: Arc<Mutex<Inner>>, gen: u64) {
     };
 
     let (config, chosen) = {
-        let g = handle.lock().unwrap();
+        let mut g = handle.lock().unwrap();
         if g.play_gen != gen {
             return;
         }
-        (g.config.clone(), g.preview_files.clone())
+        // Prefer one-shot queue (subset play); else full preview slate.
+        let chosen = g
+            .play_queue
+            .take()
+            .unwrap_or_else(|| g.preview_files.clone());
+        (g.config.clone(), chosen)
     };
 
     if chosen.is_empty() {
         let mut g = handle.lock().unwrap();
         if g.play_gen == gen {
             g.phase = SessionPhase::Idle;
+            g.play_queue = None;
             g.message = "请先「随机预览」生成片单".into();
         }
         return;

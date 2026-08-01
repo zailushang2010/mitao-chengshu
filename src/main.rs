@@ -111,10 +111,10 @@ fn main() -> eframe::Result<()> {
         ));
     }
 
-    // Full-width workbench: room for action strip + preview grid
+    // Closer to prototype desktop workbench proportions
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1080.0, 700.0])
-        .with_min_inner_size([800.0, 520.0])
+        .with_inner_size([1200.0, 780.0])
+        .with_min_inner_size([900.0, 560.0])
         .with_max_inner_size([1920.0, 1200.0])
         .with_resizable(true)
         .with_visible(true)

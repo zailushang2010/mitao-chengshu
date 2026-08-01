@@ -2,15 +2,21 @@ use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Stroke,
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// 纸感杂志色板
-pub const BG: Color32 = Color32::from_rgb(0xF7, 0xF3, 0xEC);
-pub const BG_SOFT: Color32 = Color32::from_rgb(0xEF, 0xE9, 0xE0);
-pub const INK: Color32 = Color32::from_rgb(0x1C, 0x19, 0x17);
-pub const MUTED: Color32 = Color32::from_rgb(0x78, 0x71, 0x6C);
-pub const FAINT: Color32 = Color32::from_rgb(0xA8, 0xA2, 0x9E);
-pub const LINE: Color32 = Color32::from_rgb(0xE7, 0xE0, 0xD6);
-pub const LINE_STRONG: Color32 = Color32::from_rgb(0xD6, 0xD3, 0xD1);
-pub const ON_INK: Color32 = Color32::from_rgb(0xFA, 0xFA, 0xF9);
+/// 纸感杂志色板（对齐 1.png 暖白壳）
+pub const BG: Color32 = Color32::from_rgb(0xF6, 0xF2, 0xEB);
+pub const BG_SOFT: Color32 = Color32::from_rgb(0xEE, 0xE8, 0xDF);
+/// Main content pane (slightly brighter than chrome).
+pub const BG_MAIN: Color32 = Color32::from_rgb(0xFB, 0xF9, 0xF5);
+pub const RAIL: Color32 = Color32::from_rgb(0xF2, 0xED, 0xE5);
+pub const INK: Color32 = Color32::from_rgb(0x1A, 0x17, 0x15);
+pub const MUTED: Color32 = Color32::from_rgb(0x7A, 0x72, 0x6C);
+pub const FAINT: Color32 = Color32::from_rgb(0xA9, 0xA2, 0x9A);
+pub const LINE: Color32 = Color32::from_rgb(0xE8, 0xE1, 0xD7);
+pub const LINE_STRONG: Color32 = Color32::from_rgb(0xD8, 0xD0, 0xC6);
+pub const ON_INK: Color32 = Color32::from_rgb(0xFA, 0xF8, 0xF5);
+/// Soft peach chip (待播放).
+pub const PEACH: Color32 = Color32::from_rgb(0xF2, 0xE6, 0xD4);
+pub const PEACH_INK: Color32 = Color32::from_rgb(0x6E, 0x5C, 0x48);
 
 pub fn apply_magazine_style(ctx: &egui::Context) {
     install_cjk_fonts(ctx);
