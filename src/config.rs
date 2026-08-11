@@ -115,9 +115,46 @@ pub struct Config {
     /// Workbench ops rail open (persisted across launches).
     #[serde(default = "default_workbench_sidebar_open")]
     pub workbench_sidebar_open: bool,
+    /// Preview card columns (2–5), remembered across launches.
+    #[serde(default = "default_card_cols")]
+    pub card_cols: u8,
+    /// Last main window size/position (points). Absent → default + center.
+    #[serde(default)]
+    pub window_geometry: Option<WindowGeometry>,
     /// Keep control panel above PotPlayers while movie session is active.
     #[serde(default = "default_pin_while_playing")]
     pub pin_while_playing: bool,
+}
+
+/// Persisted main-window placement (egui points, virtual-desktop space).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    /// Outer top-left X (monitor / virtual desktop).
+    pub x: f32,
+    /// Outer top-left Y.
+    pub y: f32,
+    /// Inner client width.
+    pub w: f32,
+    /// Inner client height.
+    pub h: f32,
+}
+
+impl WindowGeometry {
+    pub const MIN_W: f32 = 900.0;
+    pub const MIN_H: f32 = 560.0;
+    pub const MAX_W: f32 = 1920.0;
+    pub const MAX_H: f32 = 1200.0;
+    pub const DEFAULT_W: f32 = 1200.0;
+    pub const DEFAULT_H: f32 = 780.0;
+
+    pub fn clamp_size(self) -> Self {
+        Self {
+            x: self.x,
+            y: self.y,
+            w: self.w.clamp(Self::MIN_W, Self::MAX_W),
+            h: self.h.clamp(Self::MIN_H, Self::MAX_H),
+        }
+    }
 }
 
 fn default_tile_monitor_index() -> i32 {
@@ -155,6 +192,10 @@ fn default_video_extensions() -> Vec<String> {
 
 fn default_workbench_sidebar_open() -> bool {
     true
+}
+
+fn default_card_cols() -> u8 {
+    3
 }
 
 fn default_pin_while_playing() -> bool {
@@ -199,6 +240,8 @@ impl Default for Config {
             minimize_to_tray: false,
             tile_monitor_index: default_tile_monitor_index(),
             workbench_sidebar_open: default_workbench_sidebar_open(),
+            card_cols: default_card_cols(),
+            window_geometry: None,
             pin_while_playing: default_pin_while_playing(),
         }
     }
@@ -361,6 +404,15 @@ impl Config {
         normalize_ext_list(&mut self.video_extensions);
         normalize_ext_list(&mut self.image_extensions);
         self.slideshow_interval_secs = self.slideshow_interval_secs.clamp(1, 60);
+        self.card_cols = self.card_cols.clamp(2, 5);
+        if let Some(g) = self.window_geometry {
+            let g = g.clamp_size();
+            self.window_geometry = if g.w.is_finite() && g.h.is_finite() {
+                Some(g)
+            } else {
+                None
+            };
+        }
 
         // library_paths is authoritative. Only migrate legacy library_path when
         // library_paths is empty (old configs). Never re-insert a removed path.
@@ -639,6 +691,57 @@ mod tests {
         fs::write(&path, raw).unwrap();
         let legacy = load_from(&path).unwrap();
         assert!(legacy.workbench_sidebar_open);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn card_cols_defaults_and_roundtrips() {
+        let path = tmp_file("card_cols.json");
+        let mut c = Config::default();
+        assert_eq!(c.card_cols, 3);
+        c.card_cols = 5;
+        let c = c.normalize();
+        save_to(&path, &c).unwrap();
+        let loaded = load_from(&path).unwrap().normalize();
+        assert_eq!(loaded.card_cols, 5);
+        // Out of range clamped
+        let mut bad = Config::default();
+        bad.card_cols = 9;
+        assert_eq!(bad.normalize().card_cols, 5);
+        // Missing field → default 3
+        let raw = r#"{"default_count":4,"count_min":1,"count_max":8,"avoid_recent":true,"recent_history_size":10,"potplayer_path":"","video_extensions":[],"close_session_on_exit":false}"#;
+        fs::write(&path, raw).unwrap();
+        let legacy = load_from(&path).unwrap();
+        assert_eq!(legacy.card_cols, 3);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn window_geometry_roundtrip_and_clamp() {
+        let path = tmp_file("win_geom.json");
+        let mut c = Config::default();
+        assert!(c.window_geometry.is_none());
+        c.window_geometry = Some(WindowGeometry {
+            x: 100.0,
+            y: 80.0,
+            w: 1400.0,
+            h: 900.0,
+        });
+        save_to(&path, &c).unwrap();
+        let loaded = load_from(&path).unwrap().normalize();
+        let g = loaded.window_geometry.expect("geom");
+        assert!((g.w - 1400.0).abs() < 0.5);
+        assert!((g.x - 100.0).abs() < 0.5);
+        let mut huge = Config::default();
+        huge.window_geometry = Some(WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            w: 9999.0,
+            h: 20.0,
+        });
+        let g = huge.normalize().window_geometry.unwrap();
+        assert_eq!(g.w, WindowGeometry::MAX_W);
+        assert_eq!(g.h, WindowGeometry::MIN_H);
         let _ = fs::remove_file(&path);
     }
 }

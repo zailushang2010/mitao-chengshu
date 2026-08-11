@@ -50,6 +50,27 @@ impl MonitorInfo {
     }
 }
 
+/// Whether a saved window center is near some monitor work area (virtual desktop).
+pub fn geometry_plausible(x: f32, y: f32, w: f32, h: f32) -> bool {
+    if !w.is_finite() || !h.is_finite() || w < 100.0 || h < 100.0 {
+        return false;
+    }
+    let cx = (x + w * 0.5) as i32;
+    let cy = (y + h * 0.5) as i32;
+    let mons = list_monitors();
+    if mons.is_empty() {
+        return true;
+    }
+    const SLACK: i32 = 80;
+    mons.iter().any(|m| {
+        let r = m.work;
+        cx >= r.left - SLACK
+            && cx <= r.right + SLACK
+            && cy >= r.top - SLACK
+            && cy <= r.bottom + SLACK
+    })
+}
+
 /// Primary work area via SPI (legacy / default when index < 0).
 pub fn work_area() -> Result<Rect, String> {
     unsafe {

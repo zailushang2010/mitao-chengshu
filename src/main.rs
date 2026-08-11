@@ -4,6 +4,7 @@ mod app;
 mod brand;
 mod config;
 mod blacklist;
+mod favorites;
 mod history;
 mod index_cache;
 mod library;
@@ -98,6 +99,10 @@ fn main() -> eframe::Result<()> {
         cfg.image_count_max
     ));
 
+    // Restore last window size/pos when still on a plugged-in display.
+    let saved_geom = cfg.window_geometry.map(|g| g.clamp_size()).filter(|g| {
+        tiler::geometry_plausible(g.x, g.y, g.w, g.h)
+    });
     let session = SessionHandle::new(cfg);
     // SessionHandle::new already starts a background scan for the active mode.
     if n_roots == 0 {
@@ -111,15 +116,35 @@ fn main() -> eframe::Result<()> {
         ));
     }
 
+    use config::WindowGeometry;
+    let (init_w, init_h, restore_pos, do_center) = if let Some(g) = saved_geom {
+        log_line(&format!(
+            "viewport: restore {:.0}x{:.0} @ ({:.0},{:.0})",
+            g.w, g.h, g.x, g.y
+        ));
+        (g.w, g.h, Some((g.x, g.y)), false)
+    } else {
+        log_line("viewport: default size + center");
+        (
+            WindowGeometry::DEFAULT_W,
+            WindowGeometry::DEFAULT_H,
+            None,
+            true,
+        )
+    };
+
     // Closer to prototype desktop workbench proportions
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1200.0, 780.0])
-        .with_min_inner_size([900.0, 560.0])
-        .with_max_inner_size([1920.0, 1200.0])
+        .with_inner_size([init_w, init_h])
+        .with_min_inner_size([WindowGeometry::MIN_W, WindowGeometry::MIN_H])
+        .with_max_inner_size([WindowGeometry::MAX_W, WindowGeometry::MAX_H])
         .with_resizable(true)
         .with_visible(true)
         .with_active(true)
         .with_title(WINDOW_TITLE);
+    if let Some((x, y)) = restore_pos {
+        viewport = viewport.with_position([x, y]);
+    }
 
     if let Some(icon) = brand::egui_icon_data() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
@@ -127,7 +152,7 @@ fn main() -> eframe::Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport,
-        centered: true,
+        centered: do_center,
         ..Default::default()
     };
 
@@ -137,7 +162,12 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| {
             log_line("eframe created");
-            Ok(Box::new(app::SuijiApp::new(cc, session, show_flag)))
+            Ok(Box::new(app::SuijiApp::new(
+                cc,
+                session,
+                show_flag,
+                do_center,
+            )))
         }),
     );
 

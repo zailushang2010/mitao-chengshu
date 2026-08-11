@@ -10,7 +10,7 @@
 
 纸感杂志风 · 工作台布局 · Rust 单 exe · 托盘 · 多片库 · **MIT 开源**
 
-> 当前版本 **0.6.2**。开发流程：DEFINE → PLAN → BUILD → VERIFY → REVIEW  
+> 当前版本 **0.6.3**。开发流程：DEFINE → PLAN → BUILD → VERIFY → REVIEW  
 > 见 [`AGENTS.md`](./AGENTS.md) · [`docs/process/lifecycle.md`](./docs/process/lifecycle.md) · [`docs/product/DEFINE.md`](./docs/product/DEFINE.md)
 
 ## 界面预览
@@ -34,8 +34,9 @@
 
 其它：
 
-- 工作台：可折叠操作栏（开合会记住）、顶栏调本轮数量、主区预览  
-- 避开最近播放；拉黑永久排除（设置可移出）  
+- 工作台：顶栏调本轮数量、本轮搜索筛选、主区预览；列数与窗口位置会记住  
+- 避开最近播放；拉黑永久排除（设置可移出）；收藏标记与侧栏收藏台  
+
 - 电影：置前 / 独播 / 关闭；播放时可选面板置顶  
 - 电影播放中可切图片并存；可关后台电影  
 - 平铺工作区可选显示器；单实例二次启动唤醒  
@@ -125,7 +126,7 @@ powershell -File scripts/verify.ps1 -StopRunning
 | `minimize_to_tray` | 点 X 是否进托盘 |
 | `close_session_on_exit` | 退出时是否关闭本轮 PotPlayer |
 
-其它运行时文件（均本地、勿提交）：`history*.json`、`blacklist*.json`、`index_cache/`、`thumbs/`。
+其它运行时文件（均本地、勿提交）：`history*.json`、`blacklist*.json`、`favorites*.json`、`index_cache/`、`thumbs/`。
 
 ---
 

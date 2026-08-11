@@ -496,7 +496,7 @@ impl SuijiApp {
         ui.add_space(4.0);
         if bl_count == 0 {
             ui.label(
-                RichText::new("预览片单上点「拉黑」可加入")
+                RichText::new("预览片单上点「不再抽到」可加入")
                     .size(11.0)
                     .color(FAINT),
             );

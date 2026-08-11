@@ -190,66 +190,63 @@ fn paint_nav_icon(ui: &mut egui::Ui, c: egui::Pos2, icon: NavIcon, ink: Color32)
     }
 }
 
-/// Soft outline toolbar chip (筛选 / 排序 look-alike).
-pub(crate) fn soft_outline_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let pad = Vec2::new(12.0, 7.0);
-    let galley = ui.painter().layout_no_wrap(
-        text.to_string(),
-        egui::FontId::proportional(12.5),
-        MUTED,
-    );
-    let size = galley.size() + pad * 2.0;
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let draw = press_draw_rect(rect, &resp, true);
-    let fill = if resp.is_pointer_button_down_on() {
-        BG_SOFT
-    } else if resp.hovered() {
-        BG_MAIN
-    } else {
-        BG_MAIN
-    };
-    ui.painter().rect_filled(draw, 10.0, fill);
-    ui.painter().rect_stroke(
-        draw,
-        10.0,
-        Stroke::new(1.0, LINE_STRONG),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().galley(
-        egui::pos2(
-            draw.center().x - galley.size().x * 0.5,
-            draw.center().y - galley.size().y * 0.5,
-        ),
-        galley,
-        MUTED,
-    );
-    resp
-}
-
 /// Rounded search field chrome matching prototype top bar (32px tall for header align).
+/// When non-empty, a trailing clear control filters the current slate only.
 pub(crate) fn search_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) {
     let h = 32.0_f32;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
+    let active = !text.is_empty();
     ui.painter().rect_filled(rect, 16.0, BG_MAIN);
     ui.painter().rect_stroke(
         rect,
         16.0,
-        Stroke::new(1.0, LINE),
+        Stroke::new(1.0, if active { LINE_STRONG } else { LINE }),
         egui::StrokeKind::Inside,
     );
+    let clear_w = if active { 28.0 } else { 0.0 };
     // Inner text edit, vertically centered in the pill
     let inner = rect.shrink2(Vec2::new(12.0, 4.0));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-        ui.set_min_size(inner.size());
+    let edit_rect = egui::Rect::from_min_max(
+        inner.min,
+        egui::pos2(inner.max.x - clear_w, inner.max.y),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(edit_rect), |ui| {
+        ui.set_min_size(edit_rect.size());
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ui.add(
                 egui::TextEdit::singleline(text)
-                    .desired_width(inner.width())
+                    .id_salt("slate_search")
+                    .desired_width(edit_rect.width().max(40.0))
                     .hint_text(hint)
                     .frame(false),
             );
         });
     });
+    if active {
+        let clear_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - clear_w - 4.0, rect.center().y - 10.0),
+            Vec2::new(20.0, 20.0),
+        );
+        let clear = ui.interact(
+            clear_rect,
+            ui.id().with("slate_search_clear"),
+            Sense::click(),
+        );
+        let fg = if clear.hovered() { INK } else { MUTED };
+        ui.painter().text(
+            clear_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(16.0),
+            fg,
+        );
+        if clear.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if clear.on_hover_text("清除筛选").clicked() {
+            text.clear();
+        }
+    }
 }
 
 /// Soft count stepper matching prototype white chips (fixed 32px height for header align).
@@ -499,12 +496,24 @@ pub(crate) enum SelectionBarAction {
     Play,
     Replace,
     Remove,
+    Favorite,
     Blacklist,
     Clear,
+    /// Favorites stage: remove from favorites only.
+    Unfavorite,
 }
 
-/// Quiet paper selection strip: `3` · 播放 · 换 · 剔除 · 拉黑 · 取消
+/// Quiet paper selection strip — full labels, grouped actions (not telegram slang).
 pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<SelectionBarAction> {
+    selection_bar_ex(ui, selected, false)
+}
+
+/// `favorites_stage`: play + unfavorite + clear (no replace/remove/blacklist).
+pub(crate) fn selection_bar_ex(
+    ui: &mut egui::Ui,
+    selected: usize,
+    favorites_stage: bool,
+) -> Option<SelectionBarAction> {
     if selected == 0 {
         return None;
     }
@@ -512,55 +521,84 @@ pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<Select
     egui::Frame::NONE
         .fill(BG_SOFT)
         .stroke(Stroke::new(1.0, LINE))
-        .inner_margin(egui::Margin::symmetric(10, 6))
-        .corner_radius(2.0)
+        .inner_margin(egui::Margin::symmetric(12, 7))
+        .corner_radius(4.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.set_min_height(28.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.set_min_height(30.0);
 
-                // Count only — no “已选” noise
+                // Selected count as quiet meta, not a shout
                 ui.label(
-                    RichText::new(format!("{selected}"))
-                        .size(14.0)
-                        .color(INK)
-                        .strong(),
+                    RichText::new(format!("已选 {selected}"))
+                        .size(12.5)
+                        .color(MUTED),
                 );
-                ui.label(RichText::new("项").size(12.0).color(MUTED));
 
-                let (div, _) = ui.allocate_exact_size(Vec2::new(1.0, 16.0), Sense::hover());
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(div.center().x, div.top() + 1.0),
-                        egui::pos2(div.center().x, div.bottom() - 1.0),
-                    ],
-                    Stroke::new(1.0, LINE_STRONG),
-                );
+                bar_v_div(ui);
 
                 let play_label = if selected == 1 { "播放" } else { "播放所选" };
-                if bar_solid_btn(ui, play_label).clicked() {
+                if bar_solid_btn(ui, play_label)
+                    .on_hover_text("仅开启选中项")
+                    .clicked()
+                {
                     action = Some(SelectionBarAction::Play);
                 }
-                if bar_outline_btn(ui, "换").clicked() {
-                    action = Some(SelectionBarAction::Replace);
-                }
-                if bar_outline_btn(ui, "剔除").clicked() {
-                    action = Some(SelectionBarAction::Remove);
-                }
-                if bar_outline_btn(ui, "拉黑").clicked() {
-                    action = Some(SelectionBarAction::Blacklist);
+
+                if favorites_stage {
+                    if bar_outline_btn(ui, "移出收藏", BarTone::Default)
+                        .on_hover_text("从收藏列表移除，不删文件")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Unfavorite);
+                    }
+                } else {
+                    // Edit group — same weight, complete words
+                    if bar_outline_btn(ui, "换片", BarTone::Default)
+                        .on_hover_text("为选中项各抽一部新的，其余保留")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Replace);
+                    }
+                    if bar_outline_btn(ui, "移出", BarTone::Default)
+                        .on_hover_text("仅移出本轮预览，仍可被再次抽到")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Remove);
+                    }
+                    if bar_outline_btn(ui, "收藏", BarTone::Default)
+                        .on_hover_text("加入侧栏收藏，不影响随机池")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Favorite);
+                    }
+
+                    bar_v_div(ui);
+
+                    // Permanent action — quieter, separated
+                    if bar_outline_btn(ui, "不再抽到", BarTone::Quiet)
+                        .on_hover_text("永久拉黑，设置中可移出")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Blacklist);
+                    }
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let clear = ui.add(
-                        egui::Label::new(RichText::new("取消").size(12.5).color(MUTED))
-                            .sense(Sense::click()),
+                        egui::Label::new(
+                            RichText::new("清除选择").size(12.5).color(MUTED),
+                        )
+                        .sense(Sense::click()),
                     );
                     if clear.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if clear.clicked() {
+                    if clear
+                        .on_hover_text("取消当前多选")
+                        .clicked()
+                    {
                         action = Some(SelectionBarAction::Clear);
                     }
                 });
@@ -569,14 +607,31 @@ pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<Select
     action
 }
 
+fn bar_v_div(ui: &mut egui::Ui) {
+    let (div, _) = ui.allocate_exact_size(Vec2::new(1.0, 16.0), Sense::hover());
+    ui.painter().line_segment(
+        [
+            egui::pos2(div.center().x, div.top() + 1.0),
+            egui::pos2(div.center().x, div.bottom() - 1.0),
+        ],
+        Stroke::new(1.0, LINE),
+    );
+}
+
+#[derive(Clone, Copy)]
+enum BarTone {
+    Default,
+    Quiet,
+}
+
 fn bar_solid_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let pad = Vec2::new(16.0, 5.0);
+    let pad = Vec2::new(14.0, 6.0);
     let galley = ui.painter().layout_no_wrap(
         text.to_string(),
         egui::FontId::proportional(13.0),
         ON_INK,
     );
-    let size = Vec2::new((galley.size().x + pad.x * 2.0).max(40.0), 28.0);
+    let size = Vec2::new((galley.size().x + pad.x * 2.0).max(52.0), 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let pressed = resp.is_pointer_button_down_on();
     let draw = press_draw_rect(rect, &resp, true);
@@ -587,7 +642,7 @@ fn bar_solid_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     } else {
         INK
     };
-    ui.painter().rect_filled(draw, 2.0, bg);
+    ui.painter().rect_filled(draw, 3.0, bg);
     ui.painter().galley(
         egui::pos2(
             draw.center().x - galley.size().x * 0.5,
@@ -596,17 +651,25 @@ fn bar_solid_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
         galley,
         ON_INK,
     );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     resp
 }
 
-fn bar_outline_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let pad = Vec2::new(12.0, 5.0);
+fn bar_outline_btn(ui: &mut egui::Ui, text: &str, tone: BarTone) -> egui::Response {
+    let pad = Vec2::new(12.0, 6.0);
+    let idle_fg = match tone {
+        BarTone::Default => INK,
+        BarTone::Quiet => MUTED,
+    };
     let galley = ui.painter().layout_no_wrap(
         text.to_string(),
         egui::FontId::proportional(13.0),
-        INK,
+        idle_fg,
     );
-    let size = Vec2::new((galley.size().x + pad.x * 2.0).max(44.0), 28.0);
+    // Equal visual weight for 2-char Chinese labels
+    let size = Vec2::new((galley.size().x + pad.x * 2.0).max(56.0), 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let pressed = resp.is_pointer_button_down_on();
     let draw = press_draw_rect(rect, &resp, true);
@@ -622,17 +685,31 @@ fn bar_outline_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
     } else {
         Stroke::new(1.0, LINE_STRONG)
     };
-    ui.painter().rect_filled(draw, 2.0, fill);
+    let fg = if pressed || resp.hovered() {
+        INK
+    } else {
+        idle_fg
+    };
+    ui.painter().rect_filled(draw, 3.0, fill);
     ui.painter()
-        .rect_stroke(draw, 2.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(draw, 3.0, stroke, egui::StrokeKind::Inside);
+    // Re-layout at final color so Quiet → Default hover doesn't look muddy
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(13.0),
+        fg,
+    );
     ui.painter().galley(
         egui::pos2(
             draw.center().x - galley.size().x * 0.5,
             draw.center().y - galley.size().y * 0.5,
         ),
         galley,
-        INK,
+        fg,
     );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     resp
 }
 
@@ -821,6 +898,7 @@ pub(crate) fn preview_cell(
         texture,
         selected,
         selectable,
+        false,
     )
 }
 
@@ -835,6 +913,7 @@ pub(crate) fn preview_card(
     texture: Option<&TextureHandle>,
     selected: bool,
     selectable: bool,
+    favorited: bool,
 ) -> egui::Response {
     let sense = if selectable {
         Sense::click()
@@ -947,6 +1026,25 @@ pub(crate) fn preview_card(
                 egui::pos2(c.x + s * 1.25, c.y - s * 0.85),
             ],
             Stroke::new(1.8, ON_INK),
+        );
+    } else if favorited {
+        // Soft star pin (top-right), only when not selected so checkmark wins.
+        let star_sz = 20.0_f32;
+        let br = egui::Rect::from_min_size(
+            egui::pos2(img_rect.right() - star_sz - 8.0, img_rect.top() + 8.0),
+            Vec2::splat(star_sz),
+        );
+        ui.painter().rect_filled(
+            br,
+            5.0,
+            Color32::from_rgba_unmultiplied(20, 18, 16, 150),
+        );
+        ui.painter().text(
+            br.center(),
+            egui::Align2::CENTER_CENTER,
+            "★",
+            egui::FontId::proportional(11.0),
+            PEACH,
         );
     }
 

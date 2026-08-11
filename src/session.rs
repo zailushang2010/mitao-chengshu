@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::blacklist::Blacklist;
 use crate::config::{Config, ImagePlayStyle, MediaMode};
+use crate::favorites::Favorites;
 use crate::history::History;
 use crate::library::Library;
 use crate::picker;
@@ -113,6 +114,8 @@ struct Inner {
     image_history: History,
     movie_blacklist: Blacklist,
     image_blacklist: Blacklist,
+    movie_favorites: Favorites,
+    image_favorites: Favorites,
     phase: SessionPhase,
     /// Active mode's preview slate (synced from per-mode stores on switch).
     preview_files: Vec<PathBuf>,
@@ -173,6 +176,35 @@ impl Inner {
         match self.config.media_mode {
             MediaMode::Movie => &mut self.movie_blacklist,
             MediaMode::Image => &mut self.image_blacklist,
+        }
+    }
+
+    fn favorites(&self) -> &Favorites {
+        self.favorites_for(self.config.media_mode)
+    }
+
+    fn favorites_mut(&mut self) -> &mut Favorites {
+        self.favorites_mut_for(self.config.media_mode)
+    }
+
+    fn favorites_for(&self, mode: MediaMode) -> &Favorites {
+        match mode {
+            MediaMode::Movie => &self.movie_favorites,
+            MediaMode::Image => &self.image_favorites,
+        }
+    }
+
+    fn favorites_mut_for(&mut self, mode: MediaMode) -> &mut Favorites {
+        match mode {
+            MediaMode::Movie => &mut self.movie_favorites,
+            MediaMode::Image => &mut self.image_favorites,
+        }
+    }
+
+    fn save_favorites_for(&self, mode: MediaMode) -> Result<(), String> {
+        match mode {
+            MediaMode::Movie => self.movie_favorites.save_movies(),
+            MediaMode::Image => self.image_favorites.save_images(),
         }
     }
 
@@ -262,6 +294,8 @@ impl SessionHandle {
         let image_history = History::load_images();
         let movie_blacklist = Blacklist::load_movies();
         let image_blacklist = Blacklist::load_images();
+        let movie_favorites = Favorites::load_movies();
+        let image_favorites = Favorites::load_images();
         let mut inner = Inner {
             config,
             movie_library: Library::empty(),
@@ -276,6 +310,8 @@ impl SessionHandle {
             image_history,
             movie_blacklist,
             image_blacklist,
+            movie_favorites,
+            image_favorites,
             phase: SessionPhase::Idle,
             preview_files: Vec::new(),
             movie_preview: Vec::new(),
@@ -816,6 +852,28 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
+    /// Persist preview grid column density (2–5).
+    pub fn set_card_cols(&self, cols: u8) {
+        let cols = cols.clamp(2, 5);
+        let mut g = self.inner.lock().unwrap();
+        if g.config.card_cols == cols {
+            return;
+        }
+        g.config.card_cols = cols;
+        let _ = crate::config::save(&g.config);
+    }
+
+    /// Persist main window size/position (debounced by caller).
+    pub fn set_window_geometry(&self, geom: crate::config::WindowGeometry) {
+        let geom = geom.clamp_size();
+        let mut g = self.inner.lock().unwrap();
+        if g.config.window_geometry == Some(geom) {
+            return;
+        }
+        g.config.window_geometry = Some(geom);
+        let _ = crate::config::save(&g.config);
+    }
+
     pub fn set_pin_while_playing(&self, on: bool) {
         let mut g = self.inner.lock().unwrap();
         if g.config.pin_while_playing == on {
@@ -1188,6 +1246,7 @@ impl SessionHandle {
                 if i < g.preview_files.len() {
                     let path = g.preview_files.remove(i);
                     g.blacklist_mut().add(&path);
+                    g.favorites_mut().remove(&path);
                     paths.push(path);
                 }
             }
@@ -1205,6 +1264,7 @@ impl SessionHandle {
                 MediaMode::Movie => g.movie_blacklist.save_movies(),
                 MediaMode::Image => g.image_blacklist.save_images(),
             };
+            let _ = g.save_favorites_for(mode);
         }
         paths.len()
     }
@@ -1218,6 +1278,7 @@ impl SessionHandle {
             }
             let path = g.preview_files.remove(index);
             g.blacklist_mut().add(&path);
+            g.favorites_mut().remove(&path);
             let mode = g.config.media_mode;
             sync_preview_store(&mut g);
             if g.preview_files.is_empty() {
@@ -1233,6 +1294,7 @@ impl SessionHandle {
                 MediaMode::Movie => g.movie_blacklist.save_movies(),
                 MediaMode::Image => g.image_blacklist.save_images(),
             };
+            let _ = g.save_favorites_for(mode);
         }
         Some(path)
     }
@@ -1257,6 +1319,201 @@ impl SessionHandle {
 
     pub fn blacklist_paths(&self) -> Vec<PathBuf> {
         self.inner.lock().unwrap().blacklist().as_path_set()
+    }
+
+    pub fn favorite_count(&self) -> usize {
+        self.favorite_count_for(self.media_mode())
+    }
+
+    pub fn favorite_count_for(&self, mode: MediaMode) -> usize {
+        self.inner.lock().unwrap().favorites_for(mode).len()
+    }
+
+    /// Favorites for the active media mode (may include missing files).
+    pub fn favorite_paths(&self) -> Vec<PathBuf> {
+        self.favorite_paths_for(self.media_mode())
+    }
+
+    pub fn favorite_paths_for(&self, mode: MediaMode) -> Vec<PathBuf> {
+        self.inner
+            .lock()
+            .unwrap()
+            .favorites_for(mode)
+            .as_path_set()
+    }
+
+    /// Favorites that still exist on disk (newest first for stable UI).
+    pub fn favorite_paths_existing(&self) -> Vec<PathBuf> {
+        self.favorite_paths_existing_for(self.media_mode())
+    }
+
+    pub fn favorite_paths_existing_for(&self, mode: MediaMode) -> Vec<PathBuf> {
+        self.inner
+            .lock()
+            .unwrap()
+            .favorites_for(mode)
+            .as_path_set()
+            .into_iter()
+            .filter(|p| p.is_file())
+            .rev()
+            .collect()
+    }
+
+    pub fn is_favorite(&self, path: &std::path::Path) -> bool {
+        self.inner.lock().unwrap().favorites().contains(path)
+    }
+
+    pub fn is_favorite_in(&self, mode: MediaMode, path: &std::path::Path) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .favorites_for(mode)
+            .contains(path)
+    }
+
+    /// Toggle favorite for one path. Returns whether it is now favorited.
+    pub fn toggle_favorite(&self, path: &std::path::Path) -> bool {
+        let (now, mode) = {
+            let mut g = self.inner.lock().unwrap();
+            let now = g.favorites_mut().toggle(path);
+            (now, g.config.media_mode)
+        };
+        let g = self.inner.lock().unwrap();
+        let _ = g.save_favorites_for(mode);
+        now
+    }
+
+    /// Add several preview slots to favorites. Returns how many newly added.
+    pub fn favorite_preview_items(&self, indices: &[usize]) -> usize {
+        let (n, mode) = {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Idle {
+                return 0;
+            }
+            let mut added = 0usize;
+            let mut seen = std::collections::HashSet::new();
+            for &i in indices {
+                if i >= g.preview_files.len() || !seen.insert(i) {
+                    continue;
+                }
+                let path = g.preview_files[i].clone();
+                if !g.favorites().contains(&path) {
+                    g.favorites_mut().add(&path);
+                    added += 1;
+                }
+            }
+            (added, g.config.media_mode)
+        };
+        if n > 0 {
+            let g = self.inner.lock().unwrap();
+            let _ = g.save_favorites_for(mode);
+        }
+        n
+    }
+
+    pub fn unfavorite_path(&self, path: &std::path::Path) {
+        self.unfavorite_path_for(self.media_mode(), path);
+    }
+
+    pub fn unfavorite_path_for(&self, mode: MediaMode, path: &std::path::Path) {
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.favorites_mut_for(mode).remove(path);
+        }
+        let g = self.inner.lock().unwrap();
+        let _ = g.save_favorites_for(mode);
+    }
+
+    pub fn unfavorite_paths(&self, paths: &[PathBuf]) -> usize {
+        self.unfavorite_paths_for(self.media_mode(), paths)
+    }
+
+    pub fn unfavorite_paths_for(&self, mode: MediaMode, paths: &[PathBuf]) -> usize {
+        let n = {
+            let mut g = self.inner.lock().unwrap();
+            let mut n = 0usize;
+            for p in paths {
+                if g.favorites_for(mode).contains(p) {
+                    g.favorites_mut_for(mode).remove(p);
+                    n += 1;
+                }
+            }
+            n
+        };
+        if n > 0 {
+            let g = self.inner.lock().unwrap();
+            let _ = g.save_favorites_for(mode);
+        }
+        n
+    }
+
+    /// Random preview slate drawn only from favorites (existing files).
+    pub fn roll_preview_from_favorites(&self) -> Result<usize, String> {
+        self.roll_preview_from_favorites_for(self.media_mode())
+    }
+
+    /// Switch to `mode` if needed, then roll a preview from that mode's favorites.
+    pub fn roll_preview_from_favorites_for(&self, mode: MediaMode) -> Result<usize, String> {
+        if self.media_mode() != mode {
+            self.set_media_mode(mode);
+        }
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle {
+            return Err("播放中无法换预览".into());
+        }
+        let pool: Vec<PathBuf> = g
+            .favorites_for(mode)
+            .as_path_set()
+            .into_iter()
+            .filter(|p| p.is_file())
+            .collect();
+        if pool.is_empty() {
+            return Err(match mode {
+                MediaMode::Movie => "电影收藏为空或文件已不在".into(),
+                MediaMode::Image => "图片收藏为空或文件已不在".into(),
+            });
+        }
+        let n = g.config.clamp_count_for(mode, g.ui_count);
+        // history/blacklist for the active mode (synced by set_media_mode)
+        let avoid = g.history().as_path_set();
+        let blocked = g.blacklist().as_path_set();
+        let chosen = picker::pick(&pool, n, g.config.avoid_recent, &avoid, &blocked);
+        if chosen.is_empty() {
+            return Err("未能从收藏中选出".into());
+        }
+        let got = chosen.len();
+        g.preview_files = chosen;
+        sync_preview_store(&mut g);
+        g.message = preview_ready_message(&g);
+        Ok(got)
+    }
+
+    /// Play arbitrary paths (favorites stage). Sets them as preview then starts.
+    pub fn start_paths(&self, paths: Vec<PathBuf>) -> Result<usize, String> {
+        if paths.is_empty() {
+            return Err("请先选中要播放的项".into());
+        }
+        let play = {
+            let mut g = self.inner.lock().unwrap();
+            if g.phase != SessionPhase::Idle {
+                return Err("播放中无法改开播列表".into());
+            }
+            let cap = Config::ABS_COUNT_MAX;
+            let play: Vec<PathBuf> = paths
+                .into_iter()
+                .filter(|p| p.is_file())
+                .take(cap)
+                .collect();
+            if play.is_empty() {
+                return Err("所选文件已不存在".into());
+            }
+            g.preview_files = play.clone();
+            sync_preview_store(&mut g);
+            play
+        };
+        let n = play.len();
+        self.start_inner(Some(play));
+        Ok(n)
     }
 
     /// Launch current preview: movies → PotPlayer; images → in-app slideshow.

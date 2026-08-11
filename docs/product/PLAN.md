@@ -24,6 +24,8 @@
 | P2-3 | done | VERIFY 手测清单模板 + 脚本 | checklist + new-verify-entry + verify.ps1 |
 | P2-4 | done | 侧栏开合写 config | workbench_sidebar_open；0.6.2 |
 | P2-5 | done | 并存置顶/启动取消/config 容错 | 0.6.3 稳定性批 |
+| P3-1 | done | 侧栏收藏 | favorites 持久化 + 收藏台；见 changes/2026-08-10-favorites |
+| P3-2 | done | 假入口清理 + 窗口几何记忆 | 去筛选/排序 toast；搜索清除；window_geometry |
 
 ---
 
@@ -77,5 +79,6 @@
 | 候选 | 说明 |
 |------|------|
 | 显示器按设备名匹配 | 热插拔后 index 更稳 |
-| 记住窗口大小/位置 | 可选；注意多屏坐标 |
+| 启动可选自动随机预览 | 缩短打开→在看 |
+| 封面 / ffmpeg 体验 | 无封面时提示与重试 |
 | GitHub 远程与 Release 资产 | 开源后打 tag、上传 zip |
