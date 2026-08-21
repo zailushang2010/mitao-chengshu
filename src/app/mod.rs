@@ -175,7 +175,7 @@ impl SuijiApp {
             playing_sel: HashSet::new(),
             play_roster_open: false,
             slate_query: String::new(),
-            card_cols: cfg0.card_cols.clamp(2, 5),
+            card_cols: cfg0.card_cols_for(last_media_mode),
             stage_view: StageView::Browse,
             fav_tab: last_media_mode,
             geom_dirty_age: None,
@@ -196,6 +196,7 @@ impl SuijiApp {
             self.session.set_media_mode(tab);
             self.clear_slides();
         }
+        self.card_cols = self.session.card_cols_for(tab);
     }
 
     fn poll_window_geometry(&mut self, ctx: &egui::Context, dt: f32) {
@@ -604,7 +605,13 @@ impl eframe::App for SuijiApp {
             let favs = self.session.favorite_paths_existing();
             self.ensure_thumbs(&favs, ctx);
         } else {
-            self.ensure_thumbs(&snap.current_files, ctx);
+            let q = self.slate_query.trim();
+            if snap.phase == SessionPhase::Idle && !q.is_empty() {
+                let hits = self.session.search_library(q, 60);
+                self.ensure_thumbs(&hits, ctx);
+            } else {
+                self.ensure_thumbs(&snap.current_files, ctx);
+            }
         }
         let cfg = self.session.config_clone();
 
@@ -614,6 +621,8 @@ impl eframe::App for SuijiApp {
         if snap.media_mode != self.last_media_mode {
             self.last_media_mode = snap.media_mode;
             self.clear_preview_sel();
+            // Restore that mode's remembered column density
+            self.card_cols = self.session.card_cols_for(snap.media_mode);
         }
 
         // Toast: bottom-center overlay — never covers top toolbar / primary actions.
@@ -789,6 +798,15 @@ impl eframe::App for SuijiApp {
                                 } else {
                                     Vec::new()
                                 };
+                                let q = self.slate_query.trim().to_ascii_lowercase();
+                                let lib_search = !fav_stage
+                                    && snap.phase == SessionPhase::Idle
+                                    && !q.is_empty();
+                                let search_hits_buf = if lib_search {
+                                    self.session.search_library(&q, 60)
+                                } else {
+                                    Vec::new()
+                                };
                                 let has_preview = if fav_stage {
                                     !fav_files_buf.is_empty()
                                 } else {
@@ -804,18 +822,22 @@ impl eframe::App for SuijiApp {
                                 };
                                 let is_wall = is_img
                                     && snap.image_play_style == ImagePlayStyle::Wall;
-                                let files: &[PathBuf] = if fav_stage {
+                                let files: &[PathBuf] = if lib_search {
+                                    &search_hits_buf
+                                } else if fav_stage {
                                     &fav_files_buf
                                 } else {
                                     &snap.current_files
                                 };
-                                let n = if files.is_empty() {
+                                let n = if lib_search {
+                                    files.len()
+                                } else if files.is_empty() {
                                     self.session.ui_count()
                                 } else {
                                     files.len()
                                 };
                                 let (rows, cols) = crate::tiler::rows_cols(n.max(1));
-                                let idle_preview = if fav_stage {
+                                let idle_preview = if lib_search || fav_stage {
                                     !files.is_empty()
                                 } else {
                                     snap.phase == SessionPhase::Idle
@@ -1039,11 +1061,23 @@ impl eframe::App for SuijiApp {
                                                                 ),
                                                         }
                                                     }
-                                                    // Search pill (prototype top-right)
-                                                    let hint = if is_img {
-                                                        "搜索本轮图片…"
+                                                    // Search pill: idle browse → 片库；收藏/播放中 → 当前列表
+                                                    let hint = if fav_stage {
+                                                        if is_img {
+                                                            "筛选收藏图片…"
+                                                        } else {
+                                                            "筛选收藏片名…"
+                                                        }
+                                                    } else if playing {
+                                                        if is_img {
+                                                            "筛选本轮图片…"
+                                                        } else {
+                                                            "筛选本轮片名…"
+                                                        }
+                                                    } else if is_img {
+                                                        "搜索片库图片…"
                                                     } else {
-                                                        "搜索本轮片名…"
+                                                        "搜索片库片名…"
                                                     };
                                                     ui.add_space(6.0);
                                                     search_field(
@@ -1285,26 +1319,52 @@ impl eframe::App for SuijiApp {
                                                 );
                                             }
 
-                                            // Density slider — persisted in config.json
+                                            // Density slider — per-mode, persisted in config.json
                                             ui.with_layout(
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
                                                     ui.spacing_mut().item_spacing.x = 8.0;
+                                                    let mode_for_cols = if fav_stage {
+                                                        fav_tab
+                                                    } else {
+                                                        snap.media_mode
+                                                    };
                                                     let mut cols_f = self.card_cols as f32;
                                                     let resp = ui.add(
                                                         egui::Slider::new(&mut cols_f, 2.0..=5.0)
-                                                            .show_value(false)
+                                                            .integer()
+                                                            .show_value(true)
                                                             .clamping(egui::SliderClamping::Always),
                                                     );
-                                                    // Live preview while dragging; write config once on commit
+                                                    // Live preview while dragging
                                                     self.card_cols =
                                                         (cols_f.round() as u8).clamp(2, 5);
-                                                    if resp.drag_stopped()
-                                                        || (resp.changed() && !resp.dragged())
+                                                    // Commit when not dragging (drag_stopped alone
+                                                    // is flaky on some egui/winit builds).
+                                                    if !resp.dragged()
+                                                        && (resp.drag_stopped()
+                                                            || resp.changed()
+                                                            || resp.lost_focus())
                                                     {
-                                                        self.session.set_card_cols(self.card_cols);
+                                                        self.session.set_card_cols_for(
+                                                            mode_for_cols,
+                                                            self.card_cols,
+                                                        );
+                                                    } else if !resp.dragged() {
+                                                        // Idle frame: sync if UI drifted from disk
+                                                        let saved = self
+                                                            .session
+                                                            .card_cols_for(mode_for_cols);
+                                                        if self.card_cols != saved {
+                                                            self.session.set_card_cols_for(
+                                                                mode_for_cols,
+                                                                self.card_cols,
+                                                            );
+                                                        }
                                                     }
-                                                    resp.on_hover_text("卡片列数（下次启动记住）");
+                                                    resp.on_hover_text(
+                                                        "卡片列数（电影/图片分别记住）",
+                                                    );
                                                     ui.label(
                                                         RichText::new("列")
                                                             .size(11.0)
@@ -1327,6 +1387,15 @@ impl eframe::App for SuijiApp {
                                         ui.horizontal(|ui| {
                                             let meta = if playing {
                                                 format!("播放中 · {n} {unit}")
+                                            } else if lib_search {
+                                                if files.is_empty() {
+                                                    format!("片库无匹配 · {q}")
+                                                } else {
+                                                    format!(
+                                                        "片库匹配 {} {unit} · 加入本轮后再开启",
+                                                        files.len()
+                                                    )
+                                                }
                                             } else if fav_stage {
                                                 if files.is_empty() {
                                                     format!(
@@ -1382,7 +1451,7 @@ impl eframe::App for SuijiApp {
                                         if idle_preview && sel_n > 0 {
                                             ui.add_space(4.0);
                                             if let Some(act) =
-                                                selection_bar_ex(ui, sel_n, fav_stage)
+                                                selection_bar_ex(ui, sel_n, fav_stage, lib_search)
                                             {
                                                 let idxs: Vec<usize> = self
                                                     .preview_sel
@@ -1391,7 +1460,7 @@ impl eframe::App for SuijiApp {
                                                     .collect();
                                                 match act {
                                                     SelectionBarAction::Play => {
-                                                        if fav_stage {
+                                                        if fav_stage || lib_search {
                                                             if self.session.media_mode() != fav_tab
                                                             {
                                                                 self.session
@@ -1473,9 +1542,18 @@ impl eframe::App for SuijiApp {
                                                         self.show_toast(format!("已移出 {n}"));
                                                     }
                                                     SelectionBarAction::Favorite => {
-                                                        let n = self
-                                                            .session
-                                                            .favorite_preview_items(&idxs);
+                                                        let n = if lib_search {
+                                                            let paths: Vec<PathBuf> = idxs
+                                                                .iter()
+                                                                .filter_map(|&i| {
+                                                                    files.get(i).cloned()
+                                                                })
+                                                                .collect();
+                                                            self.session.favorite_files(&paths)
+                                                        } else {
+                                                            self.session
+                                                                .favorite_preview_items(&idxs)
+                                                        };
                                                         self.clear_preview_sel();
                                                         self.show_toast(if n == 0 {
                                                             "所选已在收藏中".into()
@@ -1484,11 +1562,36 @@ impl eframe::App for SuijiApp {
                                                         });
                                                     }
                                                     SelectionBarAction::Blacklist => {
-                                                        let n = self
-                                                            .session
-                                                            .blacklist_preview_items(&idxs);
+                                                        let n = if lib_search {
+                                                            let paths: Vec<PathBuf> = idxs
+                                                                .iter()
+                                                                .filter_map(|&i| {
+                                                                    files.get(i).cloned()
+                                                                })
+                                                                .collect();
+                                                            self.session.blacklist_files(&paths)
+                                                        } else {
+                                                            self.session
+                                                                .blacklist_preview_items(&idxs)
+                                                        };
                                                         self.clear_preview_sel();
                                                         self.show_toast(format!("已屏蔽 {n}"));
+                                                    }
+                                                    SelectionBarAction::JoinPreview => {
+                                                        let paths: Vec<PathBuf> = idxs
+                                                            .iter()
+                                                            .filter_map(|&i| files.get(i).cloned())
+                                                            .collect();
+                                                        match self.session.add_to_preview(&paths) {
+                                                            Ok(n) => {
+                                                                self.clear_preview_sel();
+                                                                self.clear_slate_filter();
+                                                                self.show_toast(format!(
+                                                                    "已加入本轮 {n}"
+                                                                ));
+                                                            }
+                                                            Err(e) => self.show_toast(e),
+                                                        }
                                                     }
                                                     SelectionBarAction::Unfavorite => {
                                                         let paths: Vec<PathBuf> = idxs
@@ -1751,29 +1854,26 @@ impl eframe::App for SuijiApp {
                                         }
                                     });
 
-                                // Visible indices (search filters current slate only)
-                                let q = self.slate_query.trim().to_ascii_lowercase();
+                                // Visible indices: library search already filtered; else filter slate/favorites
                                 let shown: Vec<usize> = if files.is_empty() {
                                     Vec::new()
-                                } else if q.is_empty() {
+                                } else if lib_search || q.is_empty() {
                                     (0..files.len()).collect()
                                 } else {
+                                    let tokens = crate::session::query_tokens(&q);
                                     files
                                         .iter()
                                         .enumerate()
                                         .filter(|(_, p)| {
-                                            let name = p
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().to_string())
-                                                .unwrap_or_default();
-                                            file_title(&name)
-                                                .to_ascii_lowercase()
-                                                .contains(&q)
+                                            crate::session::rank_path_query(p, &tokens)
+                                                .is_some()
                                         })
                                         .map(|(i, _)| i)
                                         .collect()
                                 };
-                                let show_n = if files.is_empty() {
+                                let show_n = if lib_search {
+                                    files.len().max(1)
+                                } else if files.is_empty() {
                                     // empty chrome: keep count-shaped placeholders
                                     n.max(1)
                                 } else {
@@ -1806,6 +1906,7 @@ impl eframe::App for SuijiApp {
                                 let mut card_ban: Option<usize> = None;
                                 let mut card_fav: Option<usize> = None;
                                 let mut card_unfav: Option<usize> = None;
+                                let mut card_join: Option<usize> = None;
                                 // One lock: star marks on browse cards
                                 let fav_keys: HashSet<String> = self
                                     .session
@@ -1833,7 +1934,23 @@ impl eframe::App for SuijiApp {
                                             ui.available_height().max(40.0),
                                         ));
 
-                                        if fav_stage && files.is_empty() {
+                                        if lib_search && files.is_empty() {
+                                            ui.centered_and_justified(|ui| {
+                                                ui.vertical_centered(|ui| {
+                                                    ui.label(
+                                                        RichText::new("片库中无匹配片名")
+                                                            .size(16.0)
+                                                            .color(MUTED),
+                                                    );
+                                                    ui.add_space(6.0);
+                                                    ui.label(
+                                                        RichText::new("试试更短的关键词，或清空搜索回到预览")
+                                                            .size(13.0)
+                                                            .color(FAINT),
+                                                    );
+                                                });
+                                            });
+                                        } else if fav_stage && files.is_empty() {
                                             let shelf = if fav_tab == MediaMode::Image {
                                                 "图片"
                                             } else {
@@ -1873,11 +1990,17 @@ impl eframe::App for SuijiApp {
                                                 .max(48.0);
                                             // Fill reserved slate height — do not cap short and leave
                                             // a dead empty band above the footer (user 右下角空白).
-                                            let cell_h = ((avail_h
+                                            let fill_h = ((avail_h
                                                 - gap * (rows_v.saturating_sub(1) as f32))
                                                 / rows_v as f32)
                                                 .max(72.0);
+                                            // Search hits: keep poster readable, scroll extra rows
+                                            // instead of shrinking every cover into one screen.
+                                            let comfy_h = (cell_w * 1.32).clamp(188.0, 340.0);
+                                            let scroll_grid = lib_search && rows_v >= 2;
+                                            let cell_h = if scroll_grid { comfy_h } else { fill_h };
 
+                                            let mut draw_rows = |ui: &mut egui::Ui| {
                                             for r in 0..rows_v {
                                                 ui.horizontal(|ui| {
                                                     ui.spacing_mut().item_spacing.x = gap;
@@ -1993,6 +2116,37 @@ impl eframe::App for SuijiApp {
                                                             }
                                                         } else if idle_preview {
                                                             cell.context_menu(|ui| {
+                                                                if lib_search {
+                                                                    if ui.button("加入").clicked()
+                                                                    {
+                                                                        card_join = Some(idx);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if ui.button("播放").clicked()
+                                                                    {
+                                                                        card_play = Some(idx);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    let fav_l = if favorited {
+                                                                        "取消"
+                                                                    } else {
+                                                                        "收藏"
+                                                                    };
+                                                                    if ui.button(fav_l).clicked() {
+                                                                        if favorited {
+                                                                            card_unfav = Some(idx);
+                                                                        } else {
+                                                                            card_fav = Some(idx);
+                                                                        }
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if ui.button("屏蔽").clicked()
+                                                                    {
+                                                                        card_ban = Some(idx);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    return;
+                                                                }
                                                                 if ui.button("播放").clicked()
                                                                 {
                                                                     card_play = Some(idx);
@@ -2036,7 +2190,11 @@ impl eframe::App for SuijiApp {
                                                                 }
                                                             });
                                                             if cell.double_clicked() {
-                                                                card_play = Some(idx);
+                                                                if lib_search {
+                                                                    card_join = Some(idx);
+                                                                } else {
+                                                                    card_play = Some(idx);
+                                                                }
                                                             } else if cell.clicked() {
                                                                 if self.preview_sel.contains(&idx)
                                                                 {
@@ -2052,11 +2210,24 @@ impl eframe::App for SuijiApp {
                                                     ui.add_space(gap);
                                                 }
                                             }
+                                            };
+                                            if scroll_grid {
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt("lib_search_grid")
+                                                    .max_height(avail_h)
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_width(avail_w);
+                                                        draw_rows(ui);
+                                                    });
+                                            } else {
+                                                draw_rows(ui);
+                                            }
                                         }
                                     });
 
                                 if let Some(i) = card_play {
-                                    if fav_stage {
+                                    if fav_stage || lib_search {
                                         if self.session.media_mode() != fav_tab {
                                             self.session.set_media_mode(fav_tab);
                                         }
@@ -2099,6 +2270,17 @@ impl eframe::App for SuijiApp {
                                     self.session.remove_preview_item(i);
                                     self.preview_sel.remove(&i);
                                     self.show_toast("已移出");
+                                } else if let Some(i) = card_join {
+                                    if let Some(p) = files.get(i).cloned() {
+                                        match self.session.add_to_preview(&[p]) {
+                                            Ok(n) => {
+                                                self.clear_preview_sel();
+                                                self.clear_slate_filter();
+                                                self.show_toast(format!("已加入本轮 {n}"));
+                                            }
+                                            Err(e) => self.show_toast(e),
+                                        }
+                                    }
                                 } else if let Some(i) = card_fav {
                                     if let Some(p) = files.get(i).cloned() {
                                         if self.session.toggle_favorite(&p) {
@@ -2118,7 +2300,13 @@ impl eframe::App for SuijiApp {
                                         self.show_toast("已移出");
                                     }
                                 } else if let Some(i) = card_ban {
-                                    if self.session.blacklist_preview_item(i).is_some() {
+                                    if lib_search {
+                                        if let Some(p) = files.get(i).cloned() {
+                                            let n = self.session.blacklist_files(&[p]);
+                                            self.preview_sel.remove(&i);
+                                            self.show_toast(format!("已屏蔽 {n}"));
+                                        }
+                                    } else if self.session.blacklist_preview_item(i).is_some() {
                                         self.preview_sel.remove(&i);
                                         self.show_toast("已屏蔽");
                                     }
@@ -2149,7 +2337,9 @@ impl eframe::App for SuijiApp {
                                 } else {
                                     shown.len()
                                 };
-                                let mid = if fav_stage {
+                                let mid = if lib_search {
+                                    format!("片库匹配 {} {}", files.len(), unit)
+                                } else if fav_stage {
                                     let shelf = if fav_tab == MediaMode::Image {
                                         "图片架"
                                     } else {

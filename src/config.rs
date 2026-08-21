@@ -115,9 +115,12 @@ pub struct Config {
     /// Workbench ops rail open (persisted across launches).
     #[serde(default = "default_workbench_sidebar_open")]
     pub workbench_sidebar_open: bool,
-    /// Preview card columns (2–5), remembered across launches.
+    /// Movie preview card columns (2–5), remembered across launches.
     #[serde(default = "default_card_cols")]
     pub card_cols: u8,
+    /// Image preview card columns (2–5), independent of movie.
+    #[serde(default = "default_card_cols")]
+    pub image_card_cols: u8,
     /// Last main window size/position (points). Absent → default + center.
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
@@ -241,6 +244,7 @@ impl Default for Config {
             tile_monitor_index: default_tile_monitor_index(),
             workbench_sidebar_open: default_workbench_sidebar_open(),
             card_cols: default_card_cols(),
+            image_card_cols: default_card_cols(),
             window_geometry: None,
             pin_while_playing: default_pin_while_playing(),
         }
@@ -248,6 +252,21 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn card_cols_for(&self, mode: MediaMode) -> u8 {
+        match mode {
+            MediaMode::Movie => self.card_cols.clamp(2, 5),
+            MediaMode::Image => self.image_card_cols.clamp(2, 5),
+        }
+    }
+
+    pub fn set_card_cols_for(&mut self, mode: MediaMode, cols: u8) {
+        let cols = cols.clamp(2, 5);
+        match mode {
+            MediaMode::Movie => self.card_cols = cols,
+            MediaMode::Image => self.image_card_cols = cols,
+        }
+    }
+
     /// Clamp against the **current** media mode's min/max.
     pub fn clamp_count(&self, n: usize) -> usize {
         self.clamp_count_for(self.media_mode, n)
@@ -405,6 +424,7 @@ impl Config {
         normalize_ext_list(&mut self.image_extensions);
         self.slideshow_interval_secs = self.slideshow_interval_secs.clamp(1, 60);
         self.card_cols = self.card_cols.clamp(2, 5);
+        self.image_card_cols = self.image_card_cols.clamp(2, 5);
         if let Some(g) = self.window_geometry {
             let g = g.clamp_size();
             self.window_geometry = if g.w.is_finite() && g.h.is_finite() {
@@ -699,20 +719,27 @@ mod tests {
         let path = tmp_file("card_cols.json");
         let mut c = Config::default();
         assert_eq!(c.card_cols, 3);
+        assert_eq!(c.image_card_cols, 3);
         c.card_cols = 5;
+        c.image_card_cols = 2;
         let c = c.normalize();
         save_to(&path, &c).unwrap();
         let loaded = load_from(&path).unwrap().normalize();
         assert_eq!(loaded.card_cols, 5);
+        assert_eq!(loaded.image_card_cols, 2);
         // Out of range clamped
         let mut bad = Config::default();
         bad.card_cols = 9;
-        assert_eq!(bad.normalize().card_cols, 5);
+        bad.image_card_cols = 1;
+        let bad = bad.normalize();
+        assert_eq!(bad.card_cols, 5);
+        assert_eq!(bad.image_card_cols, 2);
         // Missing field → default 3
         let raw = r#"{"default_count":4,"count_min":1,"count_max":8,"avoid_recent":true,"recent_history_size":10,"potplayer_path":"","video_extensions":[],"close_session_on_exit":false}"#;
         fs::write(&path, raw).unwrap();
         let legacy = load_from(&path).unwrap();
         assert_eq!(legacy.card_cols, 3);
+        assert_eq!(legacy.image_card_cols, 3);
         let _ = fs::remove_file(&path);
     }
 

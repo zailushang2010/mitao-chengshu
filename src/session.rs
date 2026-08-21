@@ -1160,15 +1160,24 @@ impl SessionHandle {
         let _ = crate::config::save(&g.config);
     }
 
-    /// Persist preview grid column density (2–5).
+    /// Persist preview grid column density (2–5) for a media mode.
     pub fn set_card_cols(&self, cols: u8) {
+        self.set_card_cols_for(self.media_mode(), cols);
+    }
+
+    pub fn set_card_cols_for(&self, mode: crate::config::MediaMode, cols: u8) {
         let cols = cols.clamp(2, 5);
         let mut g = self.inner.lock().unwrap();
-        if g.config.card_cols == cols {
+        let cur = g.config.card_cols_for(mode);
+        if cur == cols {
             return;
         }
-        g.config.card_cols = cols;
+        g.config.set_card_cols_for(mode, cols);
         let _ = crate::config::save(&g.config);
+    }
+
+    pub fn card_cols_for(&self, mode: crate::config::MediaMode) -> u8 {
+        self.inner.lock().unwrap().config.card_cols_for(mode)
     }
 
     /// Persist main window size/position (debounced by caller).
@@ -1505,6 +1514,72 @@ impl SessionHandle {
         }
     }
 
+    /// Search the **indexed library** (not just current preview).
+    /// Whitespace splits into AND tokens; rank prefers title prefix over path.
+    pub fn search_library(&self, query: &str, limit: usize) -> Vec<PathBuf> {
+        let tokens = query_tokens(query);
+        if tokens.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let g = self.inner.lock().unwrap();
+        let blocked: std::collections::HashSet<String> = g
+            .blacklist()
+            .as_path_set()
+            .iter()
+            .map(|p| p.to_string_lossy().to_ascii_lowercase())
+            .collect();
+        let mut ranked: Vec<(u8, PathBuf)> = Vec::new();
+        for p in &g.library().files {
+            let key = p.to_string_lossy().to_ascii_lowercase();
+            if blocked.contains(&key) {
+                continue;
+            }
+            if let Some(score) = rank_path_query(p, &tokens) {
+                ranked.push((score, p.clone()));
+            }
+        }
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        ranked.truncate(limit);
+        ranked.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// Append unique existing files onto the idle preview slate (cap ABS_COUNT_MAX).
+    pub fn add_to_preview(&self, paths: &[PathBuf]) -> Result<usize, String> {
+        let mut g = self.inner.lock().unwrap();
+        if g.phase != SessionPhase::Idle {
+            return Err("播放中无法改预览".into());
+        }
+        let cap = crate::config::Config::ABS_COUNT_MAX;
+        let mut added = 0usize;
+        for p in paths {
+            if g.preview_files.len() >= cap {
+                break;
+            }
+            if !p.is_file() {
+                continue;
+            }
+            let key = p.to_string_lossy().to_ascii_lowercase();
+            if g.preview_files
+                .iter()
+                .any(|x| x.to_string_lossy().to_ascii_lowercase() == key)
+            {
+                continue;
+            }
+            g.preview_files.push(p.clone());
+            added += 1;
+        }
+        if added == 0 {
+            return Err(if g.preview_files.len() >= cap {
+                "本轮已达上限 32".into()
+            } else {
+                "所选已在本轮中".into()
+            });
+        }
+        sync_preview_store(&mut g);
+        g.message = preview_ready_message(&g);
+        Ok(added)
+    }
+
     /// Remove several preview slots (higher index first). Returns removed count.
     pub fn remove_preview_items(&self, indices: &[usize]) -> usize {
         let mut g = self.inner.lock().unwrap();
@@ -1627,6 +1702,60 @@ impl SessionHandle {
 
     pub fn blacklist_paths(&self) -> Vec<PathBuf> {
         self.inner.lock().unwrap().blacklist().as_path_set()
+    }
+
+    /// Blacklist arbitrary files (library search). Also drops them from preview + favorites.
+    pub fn blacklist_files(&self, paths: &[PathBuf]) -> usize {
+        let (n, mode) = {
+            let mut g = self.inner.lock().unwrap();
+            let mut n = 0usize;
+            for p in paths {
+                if g.blacklist().contains(p) {
+                    continue;
+                }
+                g.blacklist_mut().add(p);
+                g.favorites_mut().remove(p);
+                g.preview_files.retain(|x| {
+                    x.to_string_lossy().to_ascii_lowercase()
+                        != p.to_string_lossy().to_ascii_lowercase()
+                });
+                n += 1;
+            }
+            if n > 0 {
+                sync_preview_store(&mut g);
+            }
+            (n, g.config.media_mode)
+        };
+        if n > 0 {
+            let g = self.inner.lock().unwrap();
+            let _ = match mode {
+                MediaMode::Movie => g.movie_blacklist.save_movies(),
+                MediaMode::Image => g.image_blacklist.save_images(),
+            };
+            let _ = g.save_favorites_for(mode);
+        }
+        n
+    }
+
+    /// Favorite arbitrary files (library search). Returns newly added count.
+    pub fn favorite_files(&self, paths: &[PathBuf]) -> usize {
+        let (n, mode) = {
+            let mut g = self.inner.lock().unwrap();
+            let mut n = 0usize;
+            for p in paths {
+                if g.favorites().contains(p) {
+                    continue;
+                }
+                g.favorites_mut().add(p);
+                n += 1;
+            }
+            (n, g.config.media_mode)
+        };
+        if n > 0 {
+            let g = self.inner.lock().unwrap();
+            let _ = g.save_favorites_for(mode);
+        }
+        n
     }
 
     pub fn favorite_count(&self) -> usize {
@@ -2449,6 +2578,78 @@ fn file_stem(p: &std::path::Path) -> String {
     p.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Split on whitespace; empty tokens dropped. Case-folded.
+pub(crate) fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|s| s.to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// AND match: every token must hit. Lower score is better.
+/// 0 = stem prefix, 1 = stem contains, 2 = filename, 3 = full path (folder).
+/// Rank is the **worst** token (so title-only beats needing a folder hit).
+pub(crate) fn rank_path_query(path: &std::path::Path, tokens: &[String]) -> Option<u8> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let stem = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let key = path.to_string_lossy().to_ascii_lowercase();
+    let mut worst: u8 = 0;
+    for t in tokens {
+        let part = if stem.starts_with(t.as_str()) {
+            0u8
+        } else if stem.contains(t.as_str()) {
+            1
+        } else if name.contains(t.as_str()) {
+            2
+        } else if key.contains(t.as_str()) {
+            3
+        } else {
+            return None;
+        };
+        worst = worst.max(part);
+    }
+    Some(worst)
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn tokens_split_and_fold() {
+        assert_eq!(query_tokens("  Love  2020 "), vec!["love", "2020"]);
+        assert!(query_tokens("   ").is_empty());
+    }
+
+    #[test]
+    fn and_requires_every_token() {
+        let p = Path::new(r"D:\库\LoveStory-2020.mkv");
+        assert!(rank_path_query(p, &query_tokens("love 2020")).is_some());
+        assert!(rank_path_query(p, &query_tokens("love 1999")).is_none());
+    }
+
+    #[test]
+    fn title_beats_folder_only() {
+        let title = Path::new(r"E:\other\Love.mkv");
+        let folder = Path::new(r"E:\love\clip.mkv");
+        let t = query_tokens("love");
+        let a = rank_path_query(title, &t).unwrap();
+        let b = rank_path_query(folder, &t).unwrap();
+        assert!(a < b, "stem hit {a} should rank above path hit {b}");
+    }
 }
 
 

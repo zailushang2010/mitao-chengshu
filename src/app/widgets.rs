@@ -501,18 +501,22 @@ pub(crate) enum SelectionBarAction {
     Clear,
     /// Favorites stage: remove from favorites only.
     Unfavorite,
+    /// Library search: append selected hits into the current preview slate.
+    JoinPreview,
 }
 
 /// Quiet paper selection strip — full labels, grouped actions (not telegram slang).
 pub(crate) fn selection_bar(ui: &mut egui::Ui, selected: usize) -> Option<SelectionBarAction> {
-    selection_bar_ex(ui, selected, false)
+    selection_bar_ex(ui, selected, false, false)
 }
 
-/// `favorites_stage`: play + unfavorite + clear (no replace/remove/blacklist).
+/// `favorites_stage`: play + unfavorite + clear.
+/// `library_search`: play + 加入本轮 + 收藏 + 屏蔽.
 pub(crate) fn selection_bar_ex(
     ui: &mut egui::Ui,
     selected: usize,
     favorites_stage: bool,
+    library_search: bool,
 ) -> Option<SelectionBarAction> {
     if selected == 0 {
         return None;
@@ -552,6 +556,26 @@ pub(crate) fn selection_bar_ex(
                         .clicked()
                     {
                         action = Some(SelectionBarAction::Unfavorite);
+                    }
+                } else if library_search {
+                    if bar_outline_btn(ui, "加入", BarTone::Default)
+                        .on_hover_text("把选中项加入本轮预览，再决定是否开启")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::JoinPreview);
+                    }
+                    if bar_outline_btn(ui, "收藏", BarTone::Default)
+                        .on_hover_text("加入侧栏收藏，不影响随机池")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Favorite);
+                    }
+                    bar_v_div(ui);
+                    if bar_outline_btn(ui, "屏蔽", BarTone::Quiet)
+                        .on_hover_text("永久不再抽到，设置黑名单可移出")
+                        .clicked()
+                    {
+                        action = Some(SelectionBarAction::Blacklist);
                     }
                 } else {
                     // Two-char actions — keep strip dense and consistent
