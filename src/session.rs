@@ -797,27 +797,335 @@ impl SessionHandle {
 
     /// Close one playing item; if none left → Idle.
     pub fn close_item(&self, index: usize) {
-        let (pid, regrid) = {
+        let _ = self.remove_playing_items(&[index]);
+    }
+
+    /// Remove several playing items (movie pots or image slate). Returns how many removed.
+    pub fn remove_playing_items(&self, indices: &[usize]) -> usize {
+        let mut idxs: Vec<usize> = indices.to_vec();
+        idxs.sort_unstable_by(|a, b| b.cmp(a));
+        idxs.dedup();
+
+        let (pids, removed, need_retile) = {
             let mut g = self.inner.lock().unwrap();
-            if index >= g.items.len() {
-                return;
+            if g.phase != SessionPhase::Playing {
+                return 0;
             }
-            let item = g.items.remove(index);
-            g.tile_targets.remove(&item.pid);
-            if g.items.is_empty() {
-                g.phase = SessionPhase::Idle;
-                g.geometry_guard = false;
-                g.tile_targets.clear();
-                g.message = format!("就绪 · 已索引 {} 部", g.library().len());
-                (item.pid, false)
-            } else {
-                g.message = format!("播放中 · {} 部", g.items.len());
-                (item.pid, true)
+            let mode = g.config.media_mode;
+            let mut pids = Vec::new();
+            let mut removed = 0usize;
+            match mode {
+                MediaMode::Movie => {
+                    for &i in &idxs {
+                        if i < g.items.len() {
+                            let item = g.items.remove(i);
+                            g.tile_targets.remove(&item.pid);
+                            if let Some(pos) = g.preview_files.iter().position(|p| p == &item.path)
+                            {
+                                g.preview_files.remove(pos);
+                            }
+                            pids.push(item.pid);
+                            removed += 1;
+                        }
+                    }
+                    if g.items.is_empty() {
+                        g.phase = SessionPhase::Idle;
+                        g.geometry_guard = false;
+                        g.tile_targets.clear();
+                        g.message = format!("就绪 · 已索引 {} 部", g.library().len());
+                        (pids, removed, false)
+                    } else {
+                        g.message = format!("播放中 · {} 部", g.items.len());
+                        (pids, removed, removed > 0)
+                    }
+                }
+                MediaMode::Image => {
+                    for &i in &idxs {
+                        if i < g.preview_files.len() {
+                            g.preview_files.remove(i);
+                            removed += 1;
+                        }
+                    }
+                    sync_preview_store(&mut g);
+                    if g.preview_files.is_empty() {
+                        g.phase = SessionPhase::Idle;
+                        g.message = idle_message(&g);
+                    } else {
+                        g.message = format!("播放中 · {} 张", g.preview_files.len());
+                    }
+                    (pids, removed, false)
+                }
             }
         };
-        let _ = potplayer::kill_pid(pid);
-        if regrid {
+
+        if !pids.is_empty() {
+            potplayer::kill_pids(&pids);
+        }
+        if need_retile {
             self.retile_now();
+        }
+        removed
+    }
+
+    /// While playing: randomly replace selected slots (movie = new Pot; image = new file in slate).
+    pub fn replace_playing_items(&self, indices: &[usize]) -> Result<usize, String> {
+        let mut idxs: Vec<usize> = indices
+            .iter()
+            .copied()
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        if idxs.is_empty() {
+            return Err("请先选中要换的项".into());
+        }
+
+        let mode = self.media_mode();
+        if self.inner.lock().unwrap().phase != SessionPhase::Playing {
+            return Err("仅播放中可换片".into());
+        }
+
+        match mode {
+            MediaMode::Image => {
+                let mut g = self.inner.lock().unwrap();
+                if g.is_scan_busy(MediaMode::Image) {
+                    return Err("片库索引中，请稍候".into());
+                }
+                if g.library().is_empty() {
+                    return Err("片库为空".into());
+                }
+                let avoid = g.history().as_path_set();
+                let blocked = g.blacklist().as_path_set();
+                let lib = g.library().files.clone();
+                let mut replaced = 0usize;
+                for &i in &idxs {
+                    if i >= g.preview_files.len() {
+                        continue;
+                    }
+                    let exclude = g.preview_files.clone();
+                    if let Some(next) = picker::pick_one_excluding(
+                        &lib,
+                        g.config.avoid_recent,
+                        &avoid,
+                        &blocked,
+                        &exclude,
+                    ) {
+                        g.preview_files[i] = next;
+                        replaced += 1;
+                    }
+                }
+                sync_preview_store(&mut g);
+                if replaced == 0 {
+                    return Err("没有更多可换片源".into());
+                }
+                g.message = format!("播放中 · {} 张", g.preview_files.len());
+                Ok(replaced)
+            }
+            MediaMode::Movie => {
+                let pot = {
+                    let g = self.inner.lock().unwrap();
+                    potplayer::resolve_potplayer_path(&g.config.potplayer_path)
+                };
+                let Some(pot) = pot else {
+                    return Err("无 PotPlayer，播放中无法换片（系统打开模式无单部控制）".into());
+                };
+
+                let plan: Vec<(usize, PathBuf, u32)> = {
+                    let g = self.inner.lock().unwrap();
+                    if g.phase != SessionPhase::Playing {
+                        return Err("仅播放中可换片".into());
+                    }
+                    if g.is_scan_busy(MediaMode::Movie) {
+                        return Err("片库索引中，请稍候".into());
+                    }
+                    if g.library().is_empty() {
+                        return Err("片库为空".into());
+                    }
+                    let avoid = g.history().as_path_set();
+                    let blocked = g.blacklist().as_path_set();
+                    let lib = g.library().files.clone();
+                    let mut plan = Vec::new();
+                    // Exclude all currently playing paths so we don't duplicate
+                    let mut exclude: Vec<PathBuf> =
+                        g.items.iter().map(|it| it.path.clone()).collect();
+                    for &i in &idxs {
+                        if i >= g.items.len() {
+                            continue;
+                        }
+                        match picker::pick_one_excluding(
+                            &lib,
+                            g.config.avoid_recent,
+                            &avoid,
+                            &blocked,
+                            &exclude,
+                        ) {
+                            Some(next) => {
+                                exclude.push(next.clone());
+                                let old_pid = g.items[i].pid;
+                                plan.push((i, next, old_pid));
+                            }
+                            None => break,
+                        }
+                    }
+                    plan
+                };
+
+                if plan.is_empty() {
+                    return Err("没有更多可换片源".into());
+                }
+
+                // Mark busy so UI knows we're reopening (keep Playing so panel stays)
+                {
+                    let mut g = self.inner.lock().unwrap();
+                    g.message = format!("换片重开中 · {} …", plan.len());
+                }
+
+                let n_plan = plan.len();
+                let handle = self.inner.clone();
+                thread::spawn(move || {
+                    // IMPORTANT: launch NEW first, then swap, then kill OLD.
+                    // Killing first let reap_dead_players drop the slot → looked like「删片」.
+                    let mut done: Vec<(usize, potplayer::LaunchedItem, isize)> = Vec::new();
+                    let mut kill_old: Vec<u32> = Vec::new();
+                    let mut errors: Vec<String> = Vec::new();
+
+                    for (i, next, old_pid) in plan {
+                        let (launched, hwnds, errs) =
+                            potplayer::launch_many_hidden(&pot, &[next.clone()]);
+                        errors.extend(errs);
+                        let Some(new_item) = launched.into_iter().next() else {
+                            errors.push(format!("换片启动失败：{}", next.display()));
+                            continue;
+                        };
+                        let mut hwnd = hwnds.first().copied().unwrap_or(0);
+                        if hwnd == 0 {
+                            hwnd = potplayer::wait_single_hwnd(new_item.pid, 4500);
+                        }
+                        if hwnd != 0 {
+                            tiler::hide_window(hwnd);
+                        }
+
+                        // Atomic slot swap only if that index is still the same old pot
+                        let swapped = {
+                            let mut g = handle.lock().unwrap();
+                            if g.phase != SessionPhase::Playing
+                                || i >= g.items.len()
+                                || g.items[i].pid != old_pid
+                            {
+                                false
+                            } else {
+                                let old_path = g.items[i].path.clone();
+                                g.tile_targets.remove(&old_pid);
+                                if let Some(slot) =
+                                    g.preview_files.iter().position(|p| *p == old_path)
+                                {
+                                    g.preview_files[slot] = new_item.path.clone();
+                                }
+                                g.items[i] = new_item.clone();
+                                sync_preview_store(&mut g);
+                                true
+                            }
+                        };
+
+                        if swapped {
+                            kill_old.push(old_pid);
+                            done.push((i, new_item, hwnd));
+                        } else {
+                            // Stale slot / stopped — don't leave orphan pots
+                            potplayer::kill_pids(&[new_item.pid]);
+                        }
+                    }
+
+                    // Close replaced pots only after slots hold the new PIDs
+                    if !kill_old.is_empty() {
+                        potplayer::kill_pids(&kill_old);
+                    }
+
+                    if done.is_empty() {
+                        let mut g = handle.lock().unwrap();
+                        if g.phase == SessionPhase::Playing {
+                            g.last_errors = errors;
+                            g.message = format!(
+                                "播放中 · {} 部 · 换片未成功（原片仍在）",
+                                g.items.len()
+                            );
+                        }
+                        return;
+                    }
+
+                    let (pids, mon) = {
+                        let mut g = handle.lock().unwrap();
+                        if g.phase != SessionPhase::Playing {
+                            return;
+                        }
+                        let hist_paths: Vec<PathBuf> =
+                            done.iter().map(|(_, it, _)| it.path.clone()).collect();
+                        let hist_size = g.config.recent_history_size;
+                        g.history_mut().push_many(&hist_paths, hist_size);
+                        let hist = g.history().clone();
+                        save_history(MediaMode::Movie, &hist);
+                        g.last_errors = errors;
+                        let pids: Vec<u32> = g.items.iter().map(|it| it.pid).collect();
+                        let mon = g.config.tile_monitor_index;
+                        (pids, mon)
+                    };
+
+                    // Relayout whole round and SHOW new (still-hidden) windows
+                    let Ok(area) = tiler::resolve_work_area(mon) else {
+                        let mut g = handle.lock().unwrap();
+                        if g.phase == SessionPhase::Playing {
+                            g.message = format!(
+                                "播放中 · {} 部 · 换片后无法平铺",
+                                g.items.len()
+                            );
+                        }
+                        return;
+                    };
+                    let n = pids.len().max(1);
+                    let rects = tiler::grid_layout(n, area);
+
+                    let mut hwnds = potplayer::hwnds_aligned_to_pids(&pids, 16, 80);
+                    for (i, _, h) in &done {
+                        if *i < hwnds.len() && *h != 0 {
+                            hwnds[*i] = *h;
+                        }
+                    }
+
+                    for (h, r) in hwnds.iter().zip(rects.iter()) {
+                        if *h != 0 {
+                            let _ = tiler::place_window(*h, *r, false);
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(80));
+                    for (h, r) in hwnds.iter().zip(rects.iter()) {
+                        if *h != 0 {
+                            let _ = tiler::place_window(*h, *r, true);
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                    let hwnds2 = potplayer::hwnds_aligned_to_pids(&pids, 8, 50);
+                    for (h, r) in hwnds2.iter().zip(rects.iter()) {
+                        if *h != 0 {
+                            let _ = tiler::place_window(*h, *r, true);
+                        }
+                    }
+
+                    {
+                        let mut g = handle.lock().unwrap();
+                        if g.phase != SessionPhase::Playing {
+                            return;
+                        }
+                        g.tile_targets.clear();
+                        for (pid, rect) in pids.iter().zip(rects.iter()) {
+                            g.tile_targets.insert(*pid, *rect);
+                        }
+                        g.geometry_guard = true;
+                        let n_ok = done.len();
+                        g.message = format!("播放中 · {} 部 · 已换片 {n_ok}", g.items.len());
+                    }
+                });
+
+                Ok(n_plan)
+            }
         }
     }
 

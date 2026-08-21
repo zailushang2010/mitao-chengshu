@@ -547,14 +547,14 @@ pub(crate) fn selection_bar_ex(
                 }
 
                 if favorites_stage {
-                    if bar_outline_btn(ui, "移出收藏", BarTone::Default)
+                    if bar_outline_btn(ui, "移出", BarTone::Default)
                         .on_hover_text("从收藏列表移除，不删文件")
                         .clicked()
                     {
                         action = Some(SelectionBarAction::Unfavorite);
                     }
                 } else {
-                    // Edit group — same weight, complete words
+                    // Two-char actions — keep strip dense and consistent
                     if bar_outline_btn(ui, "换片", BarTone::Default)
                         .on_hover_text("为选中项各抽一部新的，其余保留")
                         .clicked()
@@ -562,7 +562,7 @@ pub(crate) fn selection_bar_ex(
                         action = Some(SelectionBarAction::Replace);
                     }
                     if bar_outline_btn(ui, "移出", BarTone::Default)
-                        .on_hover_text("仅移出本轮预览，仍可被再次抽到")
+                        .on_hover_text("仅移出本轮，仍可被再次抽到")
                         .clicked()
                     {
                         action = Some(SelectionBarAction::Remove);
@@ -576,9 +576,8 @@ pub(crate) fn selection_bar_ex(
 
                     bar_v_div(ui);
 
-                    // Permanent action — quieter, separated
-                    if bar_outline_btn(ui, "不再抽到", BarTone::Quiet)
-                        .on_hover_text("永久拉黑，设置中可移出")
+                    if bar_outline_btn(ui, "屏蔽", BarTone::Quiet)
+                        .on_hover_text("永久不再抽到，设置黑名单可移出")
                         .clicked()
                     {
                         action = Some(SelectionBarAction::Blacklist);
@@ -587,18 +586,67 @@ pub(crate) fn selection_bar_ex(
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let clear = ui.add(
-                        egui::Label::new(
-                            RichText::new("清除选择").size(12.5).color(MUTED),
-                        )
-                        .sense(Sense::click()),
+                        egui::Label::new(RichText::new("取消").size(12.5).color(MUTED))
+                            .sense(Sense::click()),
                     );
                     if clear.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if clear
-                        .on_hover_text("取消当前多选")
-                        .clicked()
-                    {
+                    if clear.on_hover_text("取消当前多选").clicked() {
+                        action = Some(SelectionBarAction::Clear);
+                    }
+                });
+            });
+        });
+    action
+}
+
+/// Playing-round strip: `N` · 换片 · 移出 · 取消
+pub(crate) fn playing_selection_bar(
+    ui: &mut egui::Ui,
+    selected: usize,
+) -> Option<SelectionBarAction> {
+    if selected == 0 {
+        return None;
+    }
+    let mut action = None;
+    egui::Frame::NONE
+        .fill(BG_SOFT)
+        .stroke(Stroke::new(1.0, LINE))
+        .inner_margin(egui::Margin::symmetric(12, 7))
+        .corner_radius(4.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.set_min_height(30.0);
+                ui.label(
+                    RichText::new(format!("已选 {selected}"))
+                        .size(12.5)
+                        .color(MUTED),
+                );
+                bar_v_div(ui);
+                if bar_outline_btn(ui, "换片", BarTone::Default)
+                    .on_hover_text("关掉正在播的所选项，各换一部新的并重开")
+                    .clicked()
+                {
+                    action = Some(SelectionBarAction::Replace);
+                }
+                if bar_outline_btn(ui, "移出", BarTone::Default)
+                    .on_hover_text("关掉所选，本轮减员（不换新的）")
+                    .clicked()
+                {
+                    action = Some(SelectionBarAction::Remove);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let clear = ui.add(
+                        egui::Label::new(RichText::new("取消").size(12.5).color(MUTED))
+                            .sense(Sense::click()),
+                    );
+                    if clear.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if clear.clicked() {
                         action = Some(SelectionBarAction::Clear);
                     }
                 });

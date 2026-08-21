@@ -17,8 +17,9 @@ use theme::{BG, BG_MAIN, BG_SOFT, FAINT, INK, LINE, MUTED, ON_INK, RAIL};
 use widgets::{toggle, 
     count_stepper, ease_out_cubic, icon_btn, icon_btn_toggle, is_image_path, load_texture,
     mini_text_btn, file_title, nav_item, preview_card, primary_btn_w, row_action_btn,
-    mode_chip, search_field, secondary_btn, selection_bar_ex, sidebar_list_row,
-    status_pill, truncate_path, IconKind, NavIcon, SelectionBarAction,
+    mode_chip, playing_selection_bar, search_field, secondary_btn, selection_bar_ex,
+    sidebar_list_row_select, status_pill, truncate_path, IconKind, NavIcon,
+    SelectionBarAction,
 };
 use crate::config::WindowGeometry;
 
@@ -71,8 +72,12 @@ pub struct SuijiApp {
     index_fresh_accum: f32,
     /// Second instance asked us to show (named event).
     show_from_second: Arc<AtomicBool>,
-    /// Multi-select indices on idle preview slate (batch 换/剔除/拉黑).
+    /// Multi-select indices on idle preview slate (batch 换/移出/屏蔽).
     preview_sel: HashSet<usize>,
+    /// Multi-select indices while Playing (batch 换片/移出).
+    playing_sel: HashSet<usize>,
+    /// Optional name roster while playing (cards are the primary control).
+    play_roster_open: bool,
     /// Filter current slate titles (prototype search, local only).
     slate_query: String,
     /// Preferred card columns 2..=5 (prototype density slider).
@@ -167,6 +172,8 @@ impl SuijiApp {
             index_fresh_accum: 0.0,
             show_from_second,
             preview_sel: HashSet::new(),
+            playing_sel: HashSet::new(),
+            play_roster_open: false,
             slate_query: String::new(),
             card_cols: cfg0.card_cols.clamp(2, 5),
             stage_view: StageView::Browse,
@@ -241,6 +248,10 @@ impl SuijiApp {
 
     fn clear_preview_sel(&mut self) {
         self.preview_sel.clear();
+    }
+
+    fn clear_playing_sel(&mut self) {
+        self.playing_sel.clear();
     }
 
     fn clear_slate_filter(&mut self) {
@@ -1459,9 +1470,7 @@ impl eframe::App for SuijiApp {
                                                             .session
                                                             .remove_preview_items(&idxs);
                                                         self.clear_preview_sel();
-                                                        self.show_toast(format!(
-                                                            "已移出本轮 {n}"
-                                                        ));
+                                                        self.show_toast(format!("已移出 {n}"));
                                                     }
                                                     SelectionBarAction::Favorite => {
                                                         let n = self
@@ -1479,9 +1488,7 @@ impl eframe::App for SuijiApp {
                                                             .session
                                                             .blacklist_preview_items(&idxs);
                                                         self.clear_preview_sel();
-                                                        self.show_toast(format!(
-                                                            "已不再抽到 {n}"
-                                                        ));
+                                                        self.show_toast(format!("已屏蔽 {n}"));
                                                     }
                                                     SelectionBarAction::Unfavorite => {
                                                         let paths: Vec<PathBuf> = idxs
@@ -1495,7 +1502,7 @@ impl eframe::App for SuijiApp {
                                                             .unfavorite_paths_for(fav_tab, &paths);
                                                         self.clear_preview_sel();
                                                         self.show_toast(format!(
-                                                            "已移出收藏 {n}"
+                                                            "已移出 {n}"
                                                         ));
                                                     }
                                                     SelectionBarAction::Clear => {
@@ -1504,67 +1511,243 @@ impl eframe::App for SuijiApp {
                                                 }
                                             }
                                         }
-                                        if playing && !snap.items.is_empty() {
+                                        if playing {
+                                            // Cards are primary; roster is optional name sheet.
+                                            let play_n = if !snap.items.is_empty() {
+                                                snap.items.len()
+                                            } else {
+                                                files.len()
+                                            };
+                                            if play_n > 0 {
+                                            self.playing_sel.retain(|&i| i < play_n);
+                                            let play_sel_n = self.playing_sel.len();
                                             ui.add_space(4.0);
                                             ui.horizontal(|ui| {
                                                 ui.label(
-                                                    RichText::new("本轮")
+                                                    RichText::new("播放中")
                                                         .size(12.0)
                                                         .color(MUTED),
                                                 );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{play_n} {unit} · 点卡片选中，右键换片"
+                                                    ))
+                                                    .size(11.5)
+                                                    .color(FAINT),
+                                                );
+                                                if play_sel_n == 0
+                                                    && mini_text_btn(ui, "全选").clicked()
+                                                {
+                                                    self.playing_sel = (0..play_n).collect();
+                                                }
+                                                let roster_l = if self.play_roster_open {
+                                                    "收起清单"
+                                                } else {
+                                                    "清单"
+                                                };
+                                                if mini_text_btn(ui, roster_l).clicked() {
+                                                    self.play_roster_open = !self.play_roster_open;
+                                                }
                                                 if snap.media_mode == MediaMode::Movie
-                                                    && mini_text_btn(ui, "重新平铺").clicked()
+                                                    && snap.pot_available
+                                                    && mini_text_btn(ui, "平铺").clicked()
                                                 {
                                                     self.session.retile_now();
                                                     self.show_toast("重新平铺…");
                                                 }
                                             });
-                                            let list_h = 72.0_f32;
-                                            egui::ScrollArea::vertical()
-                                                .id_salt("playing_items")
-                                                .max_height(list_h)
-                                                .show(ui, |ui| {
-                                                    let mut close_idx = None;
-                                                    let mut focus_idx = None;
-                                                    let mut solo_idx = None;
-                                                    for it in &snap.items {
-                                                        let t = file_title(&it.name);
-                                                        sidebar_list_row(
-                                                            ui,
-                                                            it.index + 1,
-                                                            &t,
-                                                            128.0,
-                                                            |ui| {
-                                                                if row_action_btn(ui, "关闭")
-                                                                    .clicked()
-                                                                {
-                                                                    close_idx = Some(it.index);
+                                            if play_sel_n > 0 {
+                                                ui.add_space(4.0);
+                                                if let Some(act) =
+                                                    playing_selection_bar(ui, play_sel_n)
+                                                {
+                                                    let idxs: Vec<usize> = self
+                                                        .playing_sel
+                                                        .iter()
+                                                        .copied()
+                                                        .collect();
+                                                    match act {
+                                                        SelectionBarAction::Replace => {
+                                                            match self
+                                                                .session
+                                                                .replace_playing_items(&idxs)
+                                                            {
+                                                                Ok(n) => {
+                                                                    self.clear_playing_sel();
+                                                                    self.show_toast(format!(
+                                                                        "已换片重开 {n}"
+                                                                    ));
                                                                 }
-                                                                if row_action_btn(ui, "独播")
-                                                                    .clicked()
-                                                                {
-                                                                    solo_idx = Some(it.index);
+                                                                Err(e) => self.show_toast(e),
+                                                            }
+                                                        }
+                                                        SelectionBarAction::Remove => {
+                                                            let n = self
+                                                                .session
+                                                                .remove_playing_items(&idxs);
+                                                            self.clear_playing_sel();
+                                                            self.show_toast(format!(
+                                                                "已移出 {n}"
+                                                            ));
+                                                        }
+                                                        SelectionBarAction::Clear => {
+                                                            self.clear_playing_sel();
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            // Optional full name roster (does not steal card space by default)
+                                            if self.play_roster_open {
+                                                let list_h = (ui.available_height() * 0.35)
+                                                    .clamp(120.0, 280.0);
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt("playing_roster")
+                                                    .max_height(list_h)
+                                                    .show(ui, |ui| {
+                                                        let mut close_idx = None;
+                                                        let mut focus_idx = None;
+                                                        let mut solo_idx = None;
+                                                        let mut replace_idx = None;
+                                                        if !snap.items.is_empty() {
+                                                            for it in &snap.items {
+                                                                let t = file_title(&it.name);
+                                                                let mut sel = self
+                                                                    .playing_sel
+                                                                    .contains(&it.index);
+                                                                sidebar_list_row_select(
+                                                                    ui,
+                                                                    it.index + 1,
+                                                                    &t,
+                                                                    Some(&mut sel),
+                                                                    168.0,
+                                                                    |ui| {
+                                                                        if row_action_btn(
+                                                                            ui, "换片",
+                                                                        )
+                                                                        .clicked()
+                                                                        {
+                                                                            replace_idx =
+                                                                                Some(it.index);
+                                                                        }
+                                                                        if row_action_btn(
+                                                                            ui, "移出",
+                                                                        )
+                                                                        .clicked()
+                                                                        {
+                                                                            close_idx =
+                                                                                Some(it.index);
+                                                                        }
+                                                                        if snap.pot_available {
+                                                                            if row_action_btn(
+                                                                                ui, "独播",
+                                                                            )
+                                                                            .clicked()
+                                                                            {
+                                                                                solo_idx = Some(
+                                                                                    it.index,
+                                                                                );
+                                                                            }
+                                                                            if row_action_btn(
+                                                                                ui, "置前",
+                                                                            )
+                                                                            .clicked()
+                                                                            {
+                                                                                focus_idx = Some(
+                                                                                    it.index,
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                );
+                                                                if sel {
+                                                                    self.playing_sel
+                                                                        .insert(it.index);
+                                                                } else {
+                                                                    self.playing_sel
+                                                                        .remove(&it.index);
                                                                 }
-                                                                if row_action_btn(ui, "置前")
-                                                                    .clicked()
-                                                                {
-                                                                    focus_idx = Some(it.index);
+                                                            }
+                                                        } else {
+                                                            for (i, p) in files.iter().enumerate()
+                                                            {
+                                                                let name = p
+                                                                    .file_name()
+                                                                    .map(|n| {
+                                                                        n.to_string_lossy()
+                                                                            .to_string()
+                                                                    })
+                                                                    .unwrap_or_default();
+                                                                let t = file_title(&name);
+                                                                let mut sel = self
+                                                                    .playing_sel
+                                                                    .contains(&i);
+                                                                sidebar_list_row_select(
+                                                                    ui,
+                                                                    i + 1,
+                                                                    &t,
+                                                                    Some(&mut sel),
+                                                                    100.0,
+                                                                    |ui| {
+                                                                        if row_action_btn(
+                                                                            ui, "换片",
+                                                                        )
+                                                                        .clicked()
+                                                                        {
+                                                                            replace_idx = Some(i);
+                                                                        }
+                                                                        if row_action_btn(
+                                                                            ui, "移出",
+                                                                        )
+                                                                        .clicked()
+                                                                        {
+                                                                            close_idx = Some(i);
+                                                                        }
+                                                                    },
+                                                                );
+                                                                if sel {
+                                                                    self.playing_sel.insert(i);
+                                                                } else {
+                                                                    self.playing_sel.remove(&i);
                                                                 }
-                                                            },
-                                                        );
-                                                    }
-                                                    if let Some(i) = focus_idx {
-                                                        self.session.focus_item(i);
-                                                        self.show_window(ctx);
-                                                    }
-                                                    if let Some(i) = solo_idx {
-                                                        self.session.solo_item(i);
-                                                        self.show_window(ctx);
-                                                    }
-                                                    if let Some(i) = close_idx {
-                                                        self.session.close_item(i);
-                                                    }
-                                                });
+                                                            }
+                                                        }
+                                                        if let Some(i) = focus_idx {
+                                                            self.session.focus_item(i);
+                                                            self.show_window(ctx);
+                                                        }
+                                                        if let Some(i) = solo_idx {
+                                                            self.session.solo_item(i);
+                                                            self.clear_playing_sel();
+                                                            self.show_window(ctx);
+                                                        }
+                                                        if let Some(i) = replace_idx {
+                                                            match self
+                                                                .session
+                                                                .replace_playing_items(&[i])
+                                                            {
+                                                                Ok(_) => {
+                                                                    self.playing_sel.remove(&i);
+                                                                    self.show_toast(
+                                                                        "已换片重开",
+                                                                    );
+                                                                }
+                                                                Err(e) => self.show_toast(e),
+                                                            }
+                                                        }
+                                                        if let Some(i) = close_idx {
+                                                            let _ = self
+                                                                .session
+                                                                .remove_playing_items(&[i]);
+                                                            self.playing_sel.remove(&i);
+                                                            self.show_toast("已移出");
+                                                        }
+                                                    });
+                                            }
+                                            }
+                                        } else {
+                                            self.clear_playing_sel();
+                                            self.play_roster_open = false;
                                         }
                                     });
 
@@ -1611,8 +1794,14 @@ impl eframe::App for SuijiApp {
                                 let gap = 14.0;
                                 let pad = 20.0;
 
+                                // Playing: cards are the main control surface (select / 换片 / 移出)
+                                let play_pick = playing && !files.is_empty();
                                 let mut card_play: Option<usize> = None;
                                 let mut card_replace: Option<usize> = None;
+                                let mut card_play_replace: Option<usize> = None;
+                                let mut card_play_remove: Option<usize> = None;
+                                let mut card_play_focus: Option<usize> = None;
+                                let mut card_play_solo: Option<usize> = None;
                                 let mut card_remove: Option<usize> = None;
                                 let mut card_ban: Option<usize> = None;
                                 let mut card_fav: Option<usize> = None;
@@ -1738,8 +1927,12 @@ impl eframe::App for SuijiApp {
                                                                     .to_string(),
                                                             )
                                                         });
-                                                        let selected = idle_preview
-                                                            && self.preview_sel.contains(&idx);
+                                                        let selected = (idle_preview
+                                                            && self.preview_sel.contains(&idx))
+                                                            || (play_pick
+                                                                && self
+                                                                    .playing_sel
+                                                                    .contains(&idx));
                                                         let favorited = fav_stage
                                                             || path_opt
                                                                 .map(|p| {
@@ -1758,10 +1951,47 @@ impl eframe::App for SuijiApp {
                                                             Some(&badge),
                                                             tex,
                                                             selected,
-                                                            idle_preview,
+                                                            idle_preview || play_pick,
                                                             favorited,
                                                         );
-                                                        if idle_preview {
+                                                        if play_pick {
+                                                            cell.context_menu(|ui| {
+                                                                if ui.button("换片").clicked() {
+                                                                    card_play_replace =
+                                                                        Some(idx);
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui.button("移出").clicked() {
+                                                                    card_play_remove = Some(idx);
+                                                                    ui.close_menu();
+                                                                }
+                                                                if snap.media_mode
+                                                                    == MediaMode::Movie
+                                                                    && snap.pot_available
+                                                                {
+                                                                    if ui.button("独播").clicked()
+                                                                    {
+                                                                        card_play_solo =
+                                                                            Some(idx);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if ui.button("置前").clicked()
+                                                                    {
+                                                                        card_play_focus =
+                                                                            Some(idx);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                }
+                                                            });
+                                                            if cell.clicked() {
+                                                                if self.playing_sel.contains(&idx)
+                                                                {
+                                                                    self.playing_sel.remove(&idx);
+                                                                } else {
+                                                                    self.playing_sel.insert(idx);
+                                                                }
+                                                            }
+                                                        } else if idle_preview {
                                                             cell.context_menu(|ui| {
                                                                 if ui.button("播放").clicked()
                                                                 {
@@ -1769,10 +1999,7 @@ impl eframe::App for SuijiApp {
                                                                     ui.close_menu();
                                                                 }
                                                                 if fav_stage {
-                                                                    if ui
-                                                                        .button("移出收藏")
-                                                                        .clicked()
-                                                                    {
+                                                                    if ui.button("移出").clicked() {
                                                                         card_unfav = Some(idx);
                                                                         ui.close_menu();
                                                                     }
@@ -1782,13 +2009,14 @@ impl eframe::App for SuijiApp {
                                                                         card_replace = Some(idx);
                                                                         ui.close_menu();
                                                                     }
-                                                                    if ui.button("移出本轮").clicked()
+                                                                    if ui.button("移出").clicked()
                                                                     {
                                                                         card_remove = Some(idx);
                                                                         ui.close_menu();
                                                                     }
+                                                                    // 取消 = 取消收藏（避免与「移出本轮」撞字）
                                                                     let fav_l = if favorited {
-                                                                        "移出收藏"
+                                                                        "取消"
                                                                     } else {
                                                                         "收藏"
                                                                     };
@@ -1800,26 +2028,22 @@ impl eframe::App for SuijiApp {
                                                                         }
                                                                         ui.close_menu();
                                                                     }
-                                                                    if ui
-                                                                        .button("不再抽到")
-                                                                        .clicked()
+                                                                    if ui.button("屏蔽").clicked()
                                                                     {
                                                                         card_ban = Some(idx);
                                                                         ui.close_menu();
                                                                     }
                                                                 }
                                                             });
-                                                        }
-                                                        if idle_preview && cell.double_clicked()
-                                                        {
-                                                            card_play = Some(idx);
-                                                        } else if idle_preview && cell.clicked()
-                                                        {
-                                                            if self.preview_sel.contains(&idx)
-                                                            {
-                                                                self.preview_sel.remove(&idx);
-                                                            } else {
-                                                                self.preview_sel.insert(idx);
+                                                            if cell.double_clicked() {
+                                                                card_play = Some(idx);
+                                                            } else if cell.clicked() {
+                                                                if self.preview_sel.contains(&idx)
+                                                                {
+                                                                    self.preview_sel.remove(&idx);
+                                                                } else {
+                                                                    self.preview_sel.insert(idx);
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1874,13 +2098,13 @@ impl eframe::App for SuijiApp {
                                 } else if let Some(i) = card_remove {
                                     self.session.remove_preview_item(i);
                                     self.preview_sel.remove(&i);
-                                    self.show_toast("已移出本轮");
+                                    self.show_toast("已移出");
                                 } else if let Some(i) = card_fav {
                                     if let Some(p) = files.get(i).cloned() {
                                         if self.session.toggle_favorite(&p) {
                                             self.show_toast("已收藏");
                                         } else {
-                                            self.show_toast("已移出收藏");
+                                            self.show_toast("已移出");
                                         }
                                     }
                                 } else if let Some(i) = card_unfav {
@@ -1891,13 +2115,32 @@ impl eframe::App for SuijiApp {
                                             self.session.unfavorite_path(&p);
                                         }
                                         self.preview_sel.remove(&i);
-                                        self.show_toast("已移出收藏");
+                                        self.show_toast("已移出");
                                     }
                                 } else if let Some(i) = card_ban {
                                     if self.session.blacklist_preview_item(i).is_some() {
                                         self.preview_sel.remove(&i);
-                                        self.show_toast("已不再抽到");
+                                        self.show_toast("已屏蔽");
                                     }
+                                } else if let Some(i) = card_play_replace {
+                                    match self.session.replace_playing_items(&[i]) {
+                                        Ok(_) => {
+                                            self.playing_sel.remove(&i);
+                                            self.show_toast("已换片重开");
+                                        }
+                                        Err(e) => self.show_toast(e),
+                                    }
+                                } else if let Some(i) = card_play_remove {
+                                    let _ = self.session.remove_playing_items(&[i]);
+                                    self.playing_sel.remove(&i);
+                                    self.show_toast("已移出");
+                                } else if let Some(i) = card_play_focus {
+                                    self.session.focus_item(i);
+                                    self.show_window(ctx);
+                                } else if let Some(i) = card_play_solo {
+                                    self.session.solo_item(i);
+                                    self.clear_playing_sel();
+                                    self.show_window(ctx);
                                 }
 
                                 // Footer: left texts grouped · 刷新 flush right (no empty thirds)
